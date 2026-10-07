@@ -261,7 +261,8 @@ def detail_view(symbol: str, window_name: str, use_demo: bool,
     st.subheader(f"Direction Forecast — next ~{config.FORECAST_HORIZON_MIN} minutes")
     fc = res["forecast"]
     if fc:
-        fc["horizon_min"] = config.FORECAST_HORIZON_MIN
+        st.markdown(f"**Next ~{config.FORECAST_HORIZON_MIN} min: {fc['label']} "
+                    f"({fc['conf']:.0%} confidence)**")
         st.plotly_chart(forecast_figure(fc), use_container_width=True)
         m1, m2 = st.columns(2)
         m1.metric("Expected move", f"±${fc['expMove']:.2f}",
@@ -333,9 +334,16 @@ def detail_view(symbol: str, window_name: str, use_demo: bool,
     # ---- Order flow / OBV ----
     st.subheader("Order Flow & Volume Accumulation")
     fl = res["flow"]
-    st.info(fl["note"])
+    if fl["note"]:
+        st.info(fl["note"])
     if quote_note and pd.isna(fl["primary"]):
         st.warning("Quote diagnostic: " + quote_note)
+    if pd.notna(fl["primary"]):
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Bid/ask size imbalance", f"{fl['primary']:+.1%}")
+        c2.metric("Bid size", f"{fl['bidSize']:,.0f}")
+        c3.metric("Ask size", f"{fl['askSize']:,.0f}")
+        st.caption(fl["label"])
     ob = res["obv"]
     if ob["available"]:
         st.dataframe(pd.DataFrame([
