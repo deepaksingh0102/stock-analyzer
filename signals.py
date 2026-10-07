@@ -64,7 +64,7 @@ def analyzer_signal(symbol: str, df_daily: pd.DataFrame,
         return demo_signal(df_daily)
     if res is None:
         if quote is None:
-            quote = engine.fetch_quote(symbol)
+            quote, _ = engine.fetch_quote(symbol)
         res = engine.analyze_symbol(
             symbol, df_daily, df_5m, bench_5m=bench_5m,
             bench_ticker=config.BENCHMARK, quote=quote,
