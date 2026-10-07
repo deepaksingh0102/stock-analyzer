@@ -46,18 +46,38 @@ def _clean_ohlc(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _secret(name: str):
+    """Read a Streamlit Cloud secret when available (None otherwise).
+
+    Kept inside data.py (not app.py) so it works whichever app.py version
+    is deployed; the import is lazy so offline tests still run.
+    """
+    try:
+        import streamlit as st
+        return st.secrets.get(name)
+    except Exception:
+        return None
+
+
 def alpaca_is_configured() -> bool:
-    """True once real Alpaca keys are pasted into config.py (HTML parity)."""
+    """True once real Alpaca keys are set (config.py or Streamlit Secrets)."""
     import config
-    return (config.APCA_API_KEY_ID not in ("", "Dummy", "PASTE_YOUR_KEY_HERE")
-            and config.APCA_API_SECRET_KEY not in ("", "Dummy", "PASTE_YOUR_SECRET_HERE"))
+    key = _secret("APCA_API_KEY_ID") or config.APCA_API_KEY_ID
+    sec = _secret("APCA_API_SECRET_KEY") or config.APCA_API_SECRET_KEY
+    return (key not in ("", "Dummy", "PASTE_YOUR_KEY_HERE")
+            and sec not in ("", "Dummy", "PASTE_YOUR_SECRET_HERE"))
 
 
 def _alpaca_headers() -> dict:
     import config
-    return {"APCA-API-KEY-ID": config.APCA_API_KEY_ID,
-            "APCA-API-SECRET-KEY": config.APCA_API_SECRET_KEY,
+    return {"APCA-API-KEY-ID": _secret("APCA_API_KEY_ID") or config.APCA_API_KEY_ID,
+            "APCA-API-SECRET-KEY": _secret("APCA_API_SECRET_KEY") or config.APCA_API_SECRET_KEY,
             "Accept": "application/json"}
+
+
+def _alpaca_feed() -> str:
+    import config
+    return _secret("ALPACA_FEED") or config.ALPACA_FEED
 
 
 def fetch_alpaca_bars(symbol: str, timeframe: str = "5Min",
@@ -71,7 +91,7 @@ def fetch_alpaca_bars(symbol: str, timeframe: str = "5Min",
     import requests
     from datetime import datetime, timedelta, timezone
 
-    feed = feed or config.ALPACA_FEED
+    feed = feed or _alpaca_feed()
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
     params = {"timeframe": timeframe, "start": start.isoformat(),
@@ -98,7 +118,7 @@ def fetch_alpaca_quote(symbol: str, feed: str | None = None) -> dict | None:
     import config
     import requests
 
-    feed = feed or config.ALPACA_FEED
+    feed = feed or _alpaca_feed()
     r = requests.get(
         f"https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest",
         headers=_alpaca_headers(), params={"feed": feed}, timeout=15)
@@ -155,22 +175,30 @@ def fetch_1m(symbol: str) -> pd.DataFrame:
     return _clean_ohlc(df)
 
 
-def fetch_quote(symbol: str) -> dict | None:
-    """Latest bid/ask (+sizes when Alpaca is configured). None if unavailable."""
+def fetch_quote(symbol: str) -> tuple[dict | None, str]:
+    """Latest bid/ask (+sizes when Alpaca is configured).
+
+    Returns (quote, note): note carries the real reason the Alpaca quote
+    failed (bad keys, wrong feed, non-US symbol, ...), so the UI can show
+    it instead of a generic message.
+    """
     if alpaca_is_configured():
         try:
-            return fetch_alpaca_quote(symbol)
-        except Exception:
-            pass
+            q = fetch_alpaca_quote(symbol)
+            if q:
+                return q, ""
+            return None, "Alpaca returned an empty quote."
+        except Exception as e:
+            return None, f"Alpaca quote failed: {e}"
     try:
         import yfinance as yf
         fi = yf.Ticker(symbol).fast_info
         bid, ask = fi.get("bid"), fi.get("ask")
         if bid and ask and bid > 0 and ask > 0:
-            return {"bid": float(bid), "ask": float(ask)}
+            return {"bid": float(bid), "ask": float(ask)}, ""
     except Exception:
         pass
-    return None
+    return None, ""
 
 
 def demo_prices(symbol: str, days: int = 504) -> pd.DataFrame:
