@@ -1063,8 +1063,11 @@ def classify_verdict(pattern: dict | None, breakout: dict, trend: dict, daily: d
     ext = ext or {}
 
     def side(reason):
+        # A Sideways verdict is itself a low-conviction directional call:
+        # the hard gates refused to agree on a direction, so there is no
+        # directional edge to size up. Show "Low" instead of a blank.
         return {"verdict": "Sideways", "dir": 0, "reason": reason,
-                "scorecard": None, "conviction": None}
+                "scorecard": None, "conviction": "Low"}
 
     if daily["bias"] == "Mixed":
         return side("Daily (higher-timeframe) trend has no clear majority — "
