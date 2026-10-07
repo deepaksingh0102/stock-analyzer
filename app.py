@@ -126,9 +126,10 @@ with st.sidebar:
     st.header("Settings")
     live = st.toggle("Live tracking (auto-refresh)", value=False,
                      help="When on, the analysis re-runs automatically at the interval below.")
-    refresh_secs = st.number_input("Refresh every (seconds)", min_value=10, max_value=3600,
-                                   value=config.AUTO_REFRESH_SECONDS, step=10,
-                                   help="How often live tracking re-runs the analysis.")
+    refresh_secs = st.number_input("Refresh every (seconds)", min_value=5, max_value=3600,
+                                   value=max(config.AUTO_REFRESH_SECONDS, 5), step=5,
+                                   help="How often live tracking re-runs the analysis. "
+                                        "Below 5s you hit Alpaca's 200-calls/min rate limit.")
     if st.button("🔄 Refresh now"):
         st.cache_data.clear()
         st.rerun()
