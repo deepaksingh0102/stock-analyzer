@@ -521,7 +521,7 @@ def watchlist_view(watchlist_text: str, use_demo: bool,
             s, sig = data.summary(df), signals.daily_signal(df)
             rows.append({"Symbol": sym, "Price": round(s["price"], 2),
                          "Change %": round(s["change_pct"], 2), "Trend": s["trend"],
-                         "RSI": round(s["rsi"]), "Signal": sig.action,
+                         "RSI": round(s["rsi"]), "Daily signal": sig.action,
                          "Entry": sig.entry, "Exit / target": sig.target,
                          "Stop loss": sig.stop_loss})
         except Exception as exc:
