@@ -15,8 +15,8 @@ and nowhere else.
 """
 
 # --- Alpaca: market-data API (from single-stock-analyzer.html) ----------------
-APCA_API_KEY_ID = "AKSYTOCUT2G6SV5C5SV2B4GQZC"            # <-- REPLACE with your Alpaca key ID
-APCA_API_SECRET_KEY = "5xPFqSxZo3FS1SJAC4mJcrj2PK9nKCQqZAhPidgD6Vfs"        # <-- REPLACE with your Alpaca secret key
+APCA_API_KEY_ID = "Dummy"            # <-- REPLACE with your Alpaca key ID
+APCA_API_SECRET_KEY = "Dummy"        # <-- REPLACE with your Alpaca secret key
 ALPACA_FEED = "sip"                  # "sip" (Algo Trader Plus) or "iex" (free-tier fallback)
 
 # --- Analyzer inputs (same defaults as single-stock-analyzer.html) -------------
