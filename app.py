@@ -65,6 +65,18 @@ def load_quote(symbol: str, use_demo: bool, bucket: int = 0):
     return data.fetch_quote(symbol)
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def load_trades(symbol: str, use_demo: bool, bucket: int = 0):
+    """Recent trade prints for absorption/velocity. None = not attempted
+    (no Alpaca keys); [] = attempted but nothing returned."""
+    if use_demo or not data.alpaca_is_configured():
+        return None
+    try:
+        return data.fetch_alpaca_trades(symbol)
+    except Exception:
+        return []
+
+
 def _bucket(live: bool, refresh_secs: int) -> int:
     return int(time.time() // refresh_secs) if live else 0
 
@@ -159,6 +171,7 @@ def detail_view(symbol: str, window_name: str, use_demo: bool,
             bench_5m = load_intraday(bench, use_demo, bucket) if bench != symbol else None
             bench2_5m = load_intraday(bench2, use_demo, bucket) if bench2 else None
             quote, quote_note = load_quote(symbol, use_demo, bucket)
+            trades = load_trades(symbol, use_demo, bucket)
     except Exception as exc:
         st.error(f"Could not load **{symbol}**: {exc}")
         st.caption("Tip: turn on **Demo data** in the sidebar to test without internet.")
@@ -167,7 +180,8 @@ def detail_view(symbol: str, window_name: str, use_demo: bool,
     res = data.analyze_symbol(
         symbol, df_daily, df_5m, df_1m, bench_5m, bench2_5m,
         bench_ticker=bench, bench2_ticker=bench2 or None, quote=quote,
-        account_size=account_size, risk_pct=risk_pct, thresholds=_thresholds())
+        account_size=account_size, risk_pct=risk_pct, trades=trades,
+        thresholds=_thresholds())
     if not res.get("ok"):
         st.error(res.get("error", "Analysis failed."))
         return
