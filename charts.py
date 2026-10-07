@@ -103,7 +103,5 @@ def forecast_figure(fc: dict) -> go.Figure:
     ))
     fig.update_layout(height=200, margin=dict(l=10, r=40, t=10, b=10),
                       xaxis=dict(range=[0, 100], title="Probability %"),
-                      showlegend=False,
-                      title=f"Next ~{fc.get('horizon_min', 45)} min: {fc['label']} "
-                            f"({fc['conf']:.0%} confidence)")
+                      showlegend=False)
     return fig
