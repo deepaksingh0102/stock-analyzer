@@ -779,7 +779,8 @@ def order_flow(quote: dict | None = None) -> dict:
     as_ = (quote or {}).get("askSize")
     if bs is None or as_ is None:
         return {"snapshot": NAN, "primary": NAN, "source": "n/a", "label": "n/a",
-                "note": "Quote size data unavailable — paste Alpaca keys into config.py "
+                "note": "Quote size data unavailable — add your Alpaca keys under "
+                        "Settings → Secrets (Streamlit Cloud) or in config.py (local) "
                         "to enable the order-flow read.",
                 "bidSize": NAN, "askSize": NAN}
     bs, as_ = float(bs), float(as_)
