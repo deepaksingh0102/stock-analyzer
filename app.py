@@ -16,6 +16,18 @@ import data
 import signals
 from charts import price_chart, radar_history_figure, forecast_figure
 
+# Streamlit Cloud secrets (App Settings → Secrets) override config.py,
+# so real API keys never have to be committed to the repo.
+try:
+    if "APCA_API_KEY_ID" in st.secrets:
+        config.APCA_API_KEY_ID = st.secrets["APCA_API_KEY_ID"]
+    if "APCA_API_SECRET_KEY" in st.secrets:
+        config.APCA_API_SECRET_KEY = st.secrets["APCA_API_SECRET_KEY"]
+    if "ALPACA_FEED" in st.secrets:
+        config.ALPACA_FEED = st.secrets["ALPACA_FEED"]
+except Exception:
+    pass
+
 st.set_page_config(page_title="Stock Analyzer", page_icon="📈", layout="wide")
 
 
@@ -48,7 +60,9 @@ def load_1m(symbol: str, use_demo: bool, bucket: int = 0):
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_quote(symbol: str, use_demo: bool, bucket: int = 0):
-    return None if use_demo else data.fetch_quote(symbol)
+    if use_demo:
+        return None, ""
+    return data.fetch_quote(symbol)
 
 
 def _bucket(live: bool, refresh_secs: int) -> int:
@@ -144,7 +158,7 @@ def detail_view(symbol: str, window_name: str, use_demo: bool,
             df_1m = load_1m(symbol, use_demo, bucket)
             bench_5m = load_intraday(bench, use_demo, bucket) if bench != symbol else None
             bench2_5m = load_intraday(bench2, use_demo, bucket) if bench2 else None
-            quote = load_quote(symbol, use_demo, bucket)
+            quote, quote_note = load_quote(symbol, use_demo, bucket)
     except Exception as exc:
         st.error(f"Could not load **{symbol}**: {exc}")
         st.caption("Tip: turn on **Demo data** in the sidebar to test without internet.")
@@ -320,6 +334,8 @@ def detail_view(symbol: str, window_name: str, use_demo: bool,
     st.subheader("Order Flow & Volume Accumulation")
     fl = res["flow"]
     st.info(fl["note"])
+    if quote_note and pd.isna(fl["primary"]):
+        st.warning("Quote diagnostic: " + quote_note)
     ob = res["obv"]
     if ob["available"]:
         st.dataframe(pd.DataFrame([
