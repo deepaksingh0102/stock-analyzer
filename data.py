@@ -1231,12 +1231,164 @@ def compute_radar(df: pd.DataFrame, atr: float,
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Live trade tape (Alpaca) — powers absorption & tape velocity
+# ---------------------------------------------------------------------------
+def fetch_alpaca_trades(symbol: str, limit: int = 1000,
+                        feed: str | None = None) -> list:
+    """Recent trades from Alpaca (data.alpaca.markets).
+
+    Returns [{"t": Timestamp (ET, tz-naive), "p": price, "s": size}], oldest
+    first. Returns [] on any failure — the UI degrades gracefully instead
+    of crashing. Needs Alpaca keys (a paid plan unlocks the SIP feed).
+    """
+    import requests
+
+    feed = feed or _alpaca_feed()
+    try:
+        r = requests.get(
+            f"https://data.alpaca.markets/v2/stocks/{symbol}/trades",
+            headers=_alpaca_headers(),
+            params={"limit": limit, "feed": feed}, timeout=20)
+        if not r.ok:
+            return []
+        out = []
+        for t in (r.json().get("trades") or []):
+            try:
+                ts = pd.Timestamp(t["t"])
+                if ts.tzinfo is not None:
+                    ts = ts.tz_convert("America/New_York").tz_localize(None)
+                out.append({"t": ts, "p": float(t["p"]), "s": float(t.get("s") or 0)})
+            except (KeyError, TypeError, ValueError):
+                continue
+        out.sort(key=lambda x: x["t"])
+        return out
+    except Exception:
+        return []
+
+
+def tick_classify(trades: list) -> tuple[float, float]:
+    """Tick rule (port of the HTML's tickClassify): uptick if the print is
+    above the previous print, downtick if below; equal prints carry the
+    previous direction. Returns (up_volume, down_volume). No quote data needed.
+    """
+    up_v = dn_v = 0.0
+    if not trades:
+        return up_v, dn_v
+    last = trades[0]["p"]
+    d = 0
+    for x in trades[1:]:
+        if x["p"] > last:
+            d = 1
+        elif x["p"] < last:
+            d = -1
+        if d > 0:
+            up_v += x["s"]
+        elif d < 0:
+            dn_v += x["s"]
+        last = x["p"]
+    return up_v, dn_v
+
+
+def tape_absorption(trades: list, med5_vol: float, atr: float) -> dict:
+    """Heavy volume with little price progress = someone absorbing flow.
+
+    Port of the HTML's absorption check. Returns {"state", "detail", "lean"}
+    with lean in {-1, 0, +1}.
+    """
+    out = {"state": "", "detail": "", "lean": 0}
+    if not trades:
+        return out
+    now = trades[-1]["t"]
+    tr5 = [x for x in trades if x["t"] >= now - pd.Timedelta(minutes=5)]
+    if len(tr5) < 10:
+        out["detail"] = (f"Only {len(tr5)} trade print(s) in the last 5 minutes — "
+                         "need 10+ for an absorption read")
+        return out
+    vol = sum(x["s"] for x in tr5)
+    prices = [x["p"] for x in tr5]
+    rng = max(prices) - min(prices)
+    vol_mult = vol / med5_vol if med5_vol and med5_vol > 0 else NAN
+    range_frac = rng / atr if atr and atr > 0 else NAN
+    up_v, dn_v = tick_classify(tr5)
+    tot = up_v + dn_v
+    net = (up_v - dn_v) / tot if tot > 0 else 0.0
+    if (rng > 0 and math.isfinite(vol_mult) and vol_mult >= 2
+            and math.isfinite(range_frac) and range_frac < 0.6):
+        if net >= 0.3:
+            out.update(state="ok", lean=1, detail=(
+                f"{vol_mult:.1f}× median 5-min volume, but price moved only "
+                f"{range_frac:.2f}× ATR — buyers absorbing {up_v / tot:.0%} of the flow: "
+                "demand defending this level (bullish defense)"))
+        elif net <= -0.3:
+            out.update(state="ok", lean=-1, detail=(
+                f"{vol_mult:.1f}× median 5-min volume, but price moved only "
+                f"{range_frac:.2f}× ATR — sellers absorbing {dn_v / tot:.0%} of the flow: "
+                "supply capping this level (bearish defense)"))
+        else:
+            out.update(state="warn", detail=(
+                f"{vol_mult:.1f}× median 5-min volume with only {range_frac:.2f}× ATR "
+                "of progress — heavy two-sided volume, large participants active on "
+                "both sides, direction unclear"))
+    else:
+        out.update(state="ok", detail=(
+            "No absorption signature — volume and price progress are proportionate"))
+    return out
+
+
+def tape_velocity(trades: list) -> dict:
+    """Trade-count burst vs its own 30-minute baseline (port of the HTML).
+
+    Returns {"state", "detail", "lean"} with lean in {-1, 0, +1}.
+    """
+    out = {"state": "", "detail": "", "lean": 0}
+    if not trades:
+        return out
+    now = trades[-1]["t"]
+    hist = [x for x in trades if x["t"] >= now - pd.Timedelta(minutes=30)]
+    tr5 = [x for x in hist if x["t"] >= now - pd.Timedelta(minutes=5)]
+    if len(tr5) < 10:
+        out["detail"] = (f"Only {len(tr5)} trade print(s) in the last 5 minutes — "
+                         "need 10+ for a velocity read")
+        return out
+    buckets: dict[int, int] = {}
+    for x in hist:
+        k = int(x["t"].value // (2 * 60 * 1_000_000_000))
+        buckets[k] = buckets.get(k, 0) + 1
+    vals = sorted(buckets.values())
+    med = vals[len(vals) // 2] if vals else 0
+    last2 = [x for x in hist if x["t"] >= now - pd.Timedelta(minutes=2)]
+    if med and med > 0 and len(buckets) >= 3:
+        spike = len(last2) / med
+        up_v, dn_v = tick_classify(last2)
+        tot = up_v + dn_v
+        net = (up_v - dn_v) / tot if tot > 0 else 0.0
+        lean = 1 if net > 0.15 else (-1 if net < -0.15 else 0)
+        out["lean"] = lean
+        if spike >= 2.5:
+            side = (" (buy-side ticks lead)" if lean > 0 else
+                    " (sell-side ticks lead)" if lean < 0 else " (mixed direction)")
+            out.update(state="warn", detail=(
+                f"Trade count is {spike:.1f}× its 30-min baseline over the last 2 min — "
+                f"the tape is accelerating{side}. Bursts often precede a directional move."))
+        else:
+            out.update(state="ok",
+                       detail=f"Trade count {spike:.1f}× baseline — normal pace")
+    else:
+        out["detail"] = "Not enough tape history for a baseline yet"
+    return out
+
+
 # Live pressure checks (tape + 1-min frame)
 # ---------------------------------------------------------------------------
 def compute_pressure(df: pd.DataFrame, df_1m: pd.DataFrame | None,
-                     atr: float) -> dict:
-    """Absorption/velocity need a live tick tape (unavailable here);
-    the 1-minute fast-momentum check runs on bars."""
+                     atr: float, trades: list | None = None) -> dict:
+    """Absorption + tape velocity from the Alpaca trade tape (when available),
+    plus the 1-minute fast-momentum check from bars.
+
+    trades=None → tape not attempted (no Alpaca keys); trades=[] → attempted
+    but no prints returned.
+    """
     out = {"available": False, "note": "", "checks": [], "lean": 0.0,
            "leanLabel": "no tape", "summary": ""}
     checks = []
@@ -1244,10 +1396,25 @@ def compute_pressure(df: pd.DataFrame, df_1m: pd.DataFrame | None,
     def add(name, state, detail):
         checks.append({"name": name, "state": state, "detail": detail})
 
-    add("Absorption (5 min)", "",
-        "No live tick tape in this app — needs a streaming trade feed.")
-    add("Tape velocity", "",
-        "No live tick tape in this app — needs a streaming trade feed.")
+    tape_lean = 0
+    if trades:
+        vols = df["Volume"].astype(float).tolist()[-20:] if len(df) else []
+        med5 = sorted(vols)[len(vols) // 2] if vols else NAN
+        ab = tape_absorption(trades, med5, atr)
+        add("Absorption (5 min)", ab["state"], ab["detail"])
+        ve = tape_velocity(trades)
+        add("Tape velocity", ve["state"], ve["detail"])
+        tape_lean = ab["lean"] + ve["lean"]
+    elif trades is None:
+        add("Absorption (5 min)", "",
+            "No trade tape — add Alpaca keys (Settings → Secrets on Streamlit Cloud, "
+            "config.py locally) to enable the live absorption read.")
+        add("Tape velocity", "",
+            "No trade tape — add Alpaca keys (Settings → Secrets on Streamlit Cloud, "
+            "config.py locally) to enable the live velocity read.")
+    else:
+        add("Absorption (5 min)", "", "Trade tape returned no prints — check the symbol.")
+        add("Tape velocity", "", "Trade tape returned no prints — check the symbol.")
 
     fast_lean, fast_ok = 0, False
     if df_1m is not None and len(df_1m) >= 20:
@@ -1275,15 +1442,19 @@ def compute_pressure(df: pd.DataFrame, df_1m: pd.DataFrame | None,
         add("Fast momentum (1-min)", "", "1-min bars unavailable (need 20+ bars)")
 
     out["checks"] = checks
-    out["available"] = fast_ok
-    if not fast_ok:
-        out["note"] = "Waiting for 1-min bars…"
+    out["available"] = fast_ok or bool(trades)
+    if not fast_ok and not trades:
+        out["note"] = "Waiting for 1-min bars or a trade tape…"
         return out
-    out["lean"] = float(fast_lean)
-    out["leanLabel"] = ("buyers in control" if fast_lean >= 1 else
-                        "sellers in control" if fast_lean <= -1 else "balanced / mixed")
-    out["summary"] = f"composite tape lean {fast_lean:+.2f} — {out['leanLabel']} " \
-                     "(1-min frame only; no live tick tape)"
+    # Composite lean: fast 1-min frame plus the tape reads (-1/0/+1 each),
+    # clamped to [-1, 1] like the HTML's composite tape lean.
+    combined = fast_lean + tape_lean
+    lean = max(-1.0, min(1.0, combined if trades else float(fast_lean)))
+    out["lean"] = float(lean)
+    out["leanLabel"] = ("buyers in control" if lean >= 0.5 else
+                        "sellers in control" if lean <= -0.5 else "balanced / mixed")
+    src = "1-min frame + live tape" if trades else "1-min frame only"
+    out["summary"] = (f"composite tape lean {lean:+.2f} — {out['leanLabel']} ({src})")
     return out
 
 
@@ -1608,7 +1779,7 @@ def analyze_symbol(symbol: str, df_daily: pd.DataFrame, df_5m: pd.DataFrame | No
                    bench2_5m: pd.DataFrame | None = None,
                    bench_ticker: str = "SPY", bench2_ticker: str | None = None,
                    quote: dict | None = None, account_size: float = 0.0,
-                   risk_pct: float = 0.0,
+                   risk_pct: float = 0.0, trades: list | None = None,
                    thresholds: dict | None = None) -> dict:
     """Run the whole analyzer engine. Returns every section the UI needs."""
     th = dict(DEFAULT_THRESHOLDS)
@@ -1668,7 +1839,7 @@ def analyze_symbol(symbol: str, df_daily: pd.DataFrame, df_5m: pd.DataFrame | No
     paired = paired_confirmations(trend, result["dir"])
 
     radar = compute_radar(df_5m, atr)
-    pressure = compute_pressure(df_5m, df_1m, atr)
+    pressure = compute_pressure(df_5m, df_1m, atr, trades)
     forecast = compute_forecast(radar, pressure, flow, obv, rs, df_5m, atr, entry)
 
     trade_plan = None
