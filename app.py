@@ -203,7 +203,12 @@ def detail_view(symbol: str, window_name: str, use_demo: bool,
     # Headline numbers
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     chg = res["changeSinceOpen"]
-    c1.metric(f"{symbol} price", fmt(res["entry"]),
+    # Show the live quote mid-price when available — the bar-close price only
+    # moves when a new 5-min bar completes, which makes the headline look frozen.
+    si = data.spread_info(quote) if quote else None
+    live_px = si["mid"] if si else None
+    px_label = f"{symbol} price · live" if live_px else f"{symbol} price"
+    c1.metric(px_label, fmt(live_px if live_px else res["entry"]),
               None if pd.isna(chg) else f"{chg:+.2f}% since open")
     c2.metric("Verdict", v["verdict"])
     c3.metric("Conviction", v["conviction"] or "—")
