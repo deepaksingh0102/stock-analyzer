@@ -99,11 +99,9 @@ with st.sidebar:
                            help="e.g. AAPL, MSFT, TSLA, RELIANCE.NS").strip().upper()
     tf_name = st.selectbox("Chart timeframe", list(data.INTRADAY_WINDOWS), index=0)
 
-    st.header("Benchmarks")
-    bench = st.text_input("Primary benchmark", value=config.BENCHMARK,
-                          help="Hard gate: a bullish read lagging this is downgraded.").strip().upper() or "SPY"
-    bench2 = st.text_input("Secondary benchmark (optional)", value=config.BENCHMARK2,
-                           help="Soft check: affects conviction only.").strip().upper()
+    # Benchmarks are fixed (SPY primary) rather than sidebar inputs.
+    bench = config.BENCHMARK
+    bench2 = config.BENCHMARK2
 
     st.header("Verdict gates")
     min_dollar_vol = st.number_input("Min avg $ volume/day", value=float(config.MIN_DOLLAR_VOL),
@@ -238,6 +236,28 @@ def detail_view(symbol: str, tf_name: str, use_demo: bool,
             or_high=or_["high"] if or_ else None,
             or_low=or_["low"] if or_ else None,
             window_label=tf_name), use_container_width=True)
+        # Plain-English takeaway for novices
+        last = frame.iloc[-1]
+        px = live_px if live_px else res["entry"]
+        st.info(data.plain_takeaway(
+            px, last["EMA9"], last["EMA21"], last["VWAP"], last["RSI"],
+            or_["high"] if or_ else None, or_["low"] if or_ else None))
+        with st.expander("How to read this chart"):
+            st.write(
+                "- **Candles** — each one is a slice of time (5 min, 15 min, or 1 hour). "
+                "Green = price went up in that slice, red = it went down.\n"
+                "- **Orange & blue lines (EMA 9 / EMA 21)** — the average price over the last "
+                "9 / 21 slices. Price above both = uptrend; below both = downtrend.\n"
+                "- **Purple dashed line (VWAP)** — the day's average price, weighted by volume. "
+                "Big traders judge themselves against it: above it = buyers winning.\n"
+                "- **Green / red dashed lines** — the highest and lowest price of the first "
+                "30 minutes (the \"opening range\"). Breaking above or below it often sets "
+                "the tone for the rest of the day.\n"
+                "- **Volume bars** — how much traded in each slice. Tall bars = strong participation.\n"
+                "- **RSI (0–100)** — momentum energy. Above 70 = overbought (buyers may be tired); "
+                "below 30 = oversold (sellers may be tired).\n"
+                "- **MACD** — momentum direction. Blue line crossing above orange = momentum turning "
+                "up; crossing below = turning down.")
 
     # ---- Direction Radar ----
     st.subheader("Direction Radar — what's changing right now")
