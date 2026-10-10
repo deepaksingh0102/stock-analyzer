@@ -14,7 +14,7 @@ import streamlit as st
 import config
 import data
 import signals
-from charts import price_chart, radar_history_figure, forecast_figure
+from charts import intraday_chart, radar_history_figure, forecast_figure
 
 # Streamlit Cloud secrets (App Settings → Secrets) override config.py,
 # so real API keys never have to be committed to the repo.
@@ -97,7 +97,7 @@ with st.sidebar:
     st.header("Search")
     symbol = st.text_input("Stock symbol", value=config.DEFAULT_SYMBOL,
                            help="e.g. AAPL, MSFT, TSLA, RELIANCE.NS").strip().upper()
-    window_name = st.selectbox("Chart window", list(data.WINDOWS), index=2)
+    tf_name = st.selectbox("Chart timeframe", list(data.INTRADAY_WINDOWS), index=0)
 
     st.header("Benchmarks")
     bench = st.text_input("Primary benchmark", value=config.BENCHMARK,
@@ -155,7 +155,7 @@ def _thresholds():
 # Tab 1: one symbol in detail
 # ---------------------------------------------------------------------------
 @st.fragment(run_every=refresh_secs if live else None)
-def detail_view(symbol: str, window_name: str, use_demo: bool,
+def detail_view(symbol: str, tf_name: str, use_demo: bool,
                 live: bool, refresh_secs: int):
     if not symbol:
         st.info("Type a stock symbol in the sidebar to begin.")
@@ -227,9 +227,17 @@ def detail_view(symbol: str, window_name: str, use_demo: bool,
             st.caption(f"Conviction: **{sc['conviction']}** "
                        f"({sc['supports']} support / {sc['contradicts']} contradict)")
 
-    # Chart
-    shown = df_daily.tail(data.WINDOWS[window_name])
-    st.plotly_chart(price_chart(shown, symbol, sig), use_container_width=True)
+    # Intraday chart: EMA9/21 + VWAP + opening-range high/low
+    frame = data.intraday_frame(df_5m, data.INTRADAY_WINDOWS[tf_name])
+    or_ = data.opening_range(df_5m)
+    if frame.empty:
+        st.info("Not enough intraday data to draw the chart.")
+    else:
+        st.plotly_chart(intraday_chart(
+            frame, symbol, sig,
+            or_high=or_["high"] if or_ else None,
+            or_low=or_["low"] if or_ else None,
+            window_label=tf_name), use_container_width=True)
 
     # ---- Direction Radar ----
     st.subheader("Direction Radar — what's changing right now")
@@ -538,6 +546,6 @@ def watchlist_view(watchlist_text: str, use_demo: bool,
 
 
 with tab_detail:
-    detail_view(symbol, window_name, use_demo, live, refresh_secs)
+    detail_view(symbol, tf_name, use_demo, live, refresh_secs)
 with tab_watch:
     watchlist_view(watchlist_text, use_demo, live, refresh_secs)
