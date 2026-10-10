@@ -337,6 +337,42 @@ def intraday_frame(df_5m: pd.DataFrame, window: str) -> pd.DataFrame:
     return df
 
 
+def plain_takeaway(price, ema9, ema21, vwap, rsi,
+                   or_high=None, or_low=None) -> str:
+    """One-line plain-English read of the intraday chart for novices."""
+    parts = []
+    if all(math.isfinite(x) for x in (price, ema9, ema21)):
+        if price > ema9 and price > ema21:
+            parts.append("trend is up")
+        elif price < ema9 and price < ema21:
+            parts.append("trend is down")
+        else:
+            parts.append("trend is choppy")
+    if math.isfinite(price) and math.isfinite(vwap):
+        parts.append("buyers in control" if price > vwap else "sellers in control")
+    if math.isfinite(rsi):
+        if rsi >= 70:
+            parts.append(f"momentum is overheated (RSI {rsi:.0f})")
+        elif rsi >= 60:
+            parts.append(f"momentum is warm (RSI {rsi:.0f})")
+        elif rsi > 40:
+            parts.append(f"momentum is neutral (RSI {rsi:.0f})")
+        elif rsi > 30:
+            parts.append(f"momentum is soft (RSI {rsi:.0f})")
+        else:
+            parts.append(f"momentum is washed out (RSI {rsi:.0f})")
+    if all(x is not None and math.isfinite(x) for x in (price, or_high, or_low)):
+        if price > or_high:
+            parts.append("price broke above the morning range")
+        elif price < or_low:
+            parts.append("price broke below the morning range")
+        else:
+            parts.append("price is still inside the morning range")
+    if not parts:
+        return "Not enough data for a chart read right now."
+    return "Chart read: " + "; ".join(parts) + "."
+
+
 def _bar_dicts(df: pd.DataFrame) -> list:
     out = []
     for ts, row in df.iterrows():
