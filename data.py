@@ -155,21 +155,24 @@ def fetch_alpaca_bars_multi(tickers: list, timeframe: str = "1D",
     return out
 
 
-def _daily_closes_many(tickers: list) -> pd.DataFrame:
+def _daily_closes_many(tickers: list) -> tuple:
     """Daily closes for many tickers: Alpaca multi-symbol when keys are set,
-    otherwise one batched Yahoo Finance call. Columns = tickers."""
+    otherwise one batched Yahoo Finance call.
+
+    Returns (closes DataFrame with ticker columns, source label)."""
     if alpaca_is_configured():
         try:
             frames = [df["Close"].rename(sym)
                       for sym, df in fetch_alpaca_bars_multi(tickers).items()]
             if frames:
-                return pd.concat(frames, axis=1)
+                return pd.concat(frames, axis=1), "Alpaca"
         except Exception:
             pass  # fall through to Yahoo
     import yfinance as yf
     px = yf.download(tickers, period="5d", interval="1d", auto_adjust=True,
                      progress=False, threads=True)
-    return px["Close"] if isinstance(px.columns, pd.MultiIndex) else px[["Close"]]
+    closes = px["Close"] if isinstance(px.columns, pd.MultiIndex) else px[["Close"]]
+    return closes, "Yahoo Finance"
 
 
 def fetch_alpaca_quote(symbol: str, feed: str | None = None) -> dict | None:
@@ -460,7 +463,7 @@ def sp500_movers() -> dict:
     """
     const = sp500_constituents()
     tickers = const["Symbol"].tolist()
-    closes = _daily_closes_many(tickers)
+    closes, source = _daily_closes_many(tickers)
     if closes.empty:
         raise ValueError("No S&P 500 price data returned.")
     asof = pd.to_datetime(closes.index[-1]).date().isoformat()
@@ -480,7 +483,7 @@ def sp500_movers() -> dict:
     df = pd.DataFrame(rows)
     return {"gainers": df.nlargest(10, "Change %").reset_index(drop=True),
             "losers": df.nsmallest(10, "Change %").reset_index(drop=True),
-            "asof": asof}
+            "asof": asof, "source": source}
 
 
 def demo_movers() -> dict:
@@ -496,7 +499,7 @@ def demo_movers() -> dict:
     })
     return {"gainers": df.nlargest(10, "Change %").reset_index(drop=True),
             "losers": df.nsmallest(10, "Change %").reset_index(drop=True),
-            "asof": "demo data"}
+            "asof": "demo data", "source": "demo data"}
 
 
 def _bar_dicts(df: pd.DataFrame) -> list:
