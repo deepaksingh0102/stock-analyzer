@@ -210,6 +210,17 @@ check("takeaway choppy/overheated",
 t = data.plain_takeaway(float("nan"), float("nan"), float("nan"),
                         float("nan"), float("nan"))
 check("takeaway no-data fallback", "Not enough data" in t)
+
+# ---------------------------------------------------------------------------
+# 11. S&P 500 movers (offline: demo data only)
+# ---------------------------------------------------------------------------
+dm = data.demo_movers()
+check("demo movers 10 gainers", len(dm["gainers"]) == 10
+      and dm["gainers"]["Change %"].is_monotonic_decreasing)
+check("demo movers 10 losers", len(dm["losers"]) == 10
+      and dm["losers"]["Change %"].is_monotonic_increasing)
+check("demo movers columns",
+      list(dm["gainers"].columns) == ["Symbol", "Name", "Price", "Change %"])
 fig = intraday_chart(frame5, "AAPL", signals.demo_signal(df),
                      or_high=or_["high"], or_low=or_["low"], window_label="5 minutes")
 check("intraday chart builds", hasattr(fig, "data") and len(fig.data) > 0)
@@ -225,6 +236,16 @@ if "--live" in sys.argv:
     check(f"live Yahoo data (AAPL last close {live['Close'].iloc[-1]:.2f})", len(live) > 100)
     live5 = data.fetch_intraday("AAPL")
     check(f"live intraday bars ({len(live5)})", len(live5) >= 31)
+    const = data.sp500_constituents()
+    check(f"S&P 500 constituents ({len(const)})", len(const) >= 480
+          and "Symbol" in const.columns and "Name" in const.columns)
+    mv = data.sp500_movers()
+    check("live S&P 500 movers",
+          len(mv["gainers"]) == 10 and len(mv["losers"]) == 10
+          and mv["gainers"]["Change %"].is_monotonic_decreasing
+          and mv["losers"]["Change %"].is_monotonic_increasing)
+    print(f"  top gainer: {mv['gainers'].iloc[0]['Symbol']} "
+          f"{mv['gainers'].iloc[0]['Change %']:+.2f}% as of {mv['asof']}")
 
 # ---------------------------------------------------------------------------
 # 9. Tape: tick classification, absorption, velocity, pressure integration
