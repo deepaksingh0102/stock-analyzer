@@ -28,7 +28,8 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="Stock Analyzer", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Stock Analyzer", page_icon="📈", layout="wide",
+                   initial_sidebar_state="collapsed")
 
 
 # ---------------------------------------------------------------------------
@@ -223,21 +224,22 @@ def detail_view(symbol: str, tf_name: str, use_demo: bool,
             hist.append((now, res["radar"]["score"]))
             del hist[:-360]
 
-    # Headline numbers
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    # Headline numbers (3+3 so they stay readable on phones)
+    h1, h2, h3 = st.columns(3)
+    h4, h5, h6 = st.columns(3)
     chg = res["changeSinceOpen"]
     # Show the live quote mid-price when available — the bar-close price only
     # moves when a new 5-min bar completes, which makes the headline look frozen.
     si = data.spread_info(quote) if quote else None
     live_px = si["mid"] if si else None
     px_label = f"{symbol} price · live" if live_px else f"{symbol} price"
-    c1.metric(px_label, fmt(live_px if live_px else res["entry"]),
+    h1.metric(px_label, fmt(live_px if live_px else res["entry"]),
               None if pd.isna(chg) else f"{chg:+.2f}% since open")
-    c2.metric("Verdict", v["verdict"])
-    c3.metric("Conviction", v["conviction"] or "—")
-    c4.metric("RSI (14)", f"{res['trend']['rsi']:.0f}" if pd.notna(res["trend"]["rsi"]) else "—")
-    c5.metric("ADX", f"{res['adx5m']['adx']:.0f}" if pd.notna(res["adx5m"]["adx"]) else "—")
-    c6.metric("Signal", sig.action)
+    h2.metric("Verdict", v["verdict"])
+    h3.metric("Conviction", v["conviction"] or "—")
+    h4.metric("RSI (14)", f"{res['trend']['rsi']:.0f}" if pd.notna(res["trend"]["rsi"]) else "—")
+    h5.metric("ADX", f"{res['adx5m']['adx']:.0f}" if pd.notna(res["adx5m"]["adx"]) else "—")
+    h6.metric("Signal", sig.action)
 
     # Why: reason + scorecard
     with st.expander("Why this verdict", expanded=True):
@@ -288,15 +290,13 @@ def detail_view(symbol: str, tf_name: str, use_demo: bool,
     st.subheader("Direction Radar — what's changing right now")
     r = res["radar"]
     if r:
-        rc1, rc2 = st.columns([1, 2])
         label = ("STRONG UP" if r["score"] >= 45 else "LEANING UP" if r["score"] >= 20
                  else "STRONG DOWN" if r["score"] <= -45 else
                  "LEANING DOWN" if r["score"] <= -20 else "NEUTRAL / CHOP")
-        rc1.metric("Radar score", f"{r['score']:+d}", label)
-        rc1.caption(f"{r['up']} up · {r['dn']} down · "
-                    f"{len(r['comps']) - r['up'] - r['dn']} flat")
-        with rc2:
-            st.plotly_chart(radar_history_figure(hist), use_container_width=True)
+        st.metric("Radar score", f"{r['score']:+d}", label,
+                  help=f"{r['up']} up · {r['dn']} down · "
+                       f"{len(r['comps']) - r['up'] - r['dn']} flat")
+        st.plotly_chart(radar_history_figure(hist), use_container_width=True)
         comp_rows = [{"Component": c["name"], "Lean": f"{c['s']:+.2f}",
                       "Detail": c["detail"]} for c in r["comps"]]
         st.dataframe(pd.DataFrame(comp_rows), hide_index=True, use_container_width=True)
@@ -574,18 +574,15 @@ def movers_view(use_demo: bool, live: bool, refresh_secs: int):
         m = load_sp500_movers(use_demo, bucket)
     if m.get("error"):
         st.error(f"Could not load S&P 500 movers: {m['error']}")
-        st.caption("Check your internet connection — this tab needs Yahoo Finance.")
+        st.caption("Check your internet connection and try again.")
         return
-    st.caption(f"As of {m['asof']} · source: Yahoo Finance")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**🟢 Top 10 Gainers**")
-        st.dataframe(_style_movers(m["gainers"]), hide_index=True,
-                     use_container_width=True)
-    with c2:
-        st.markdown("**🔴 Top 10 Losers**")
-        st.dataframe(_style_movers(m["losers"]), hide_index=True,
-                     use_container_width=True)
+    st.caption(f"As of {m['asof']} · source: {m.get('source', 'Yahoo Finance')}")
+    st.markdown("**🟢 Top 10 Gainers**")
+    st.dataframe(_style_movers(m["gainers"]), hide_index=True,
+                 use_container_width=True)
+    st.markdown("**🔴 Top 10 Losers**")
+    st.dataframe(_style_movers(m["losers"]), hide_index=True,
+                 use_container_width=True)
 
 
 def watchlist_view(watchlist_text: str, use_demo: bool,
