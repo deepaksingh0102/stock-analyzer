@@ -197,6 +197,19 @@ check("vwap series finite", vs.notna().all() and (vs > 0).all())
 trend = data.current_trend(df5)
 check("intraday trend uses EMA9/21",
       math.isfinite(trend["ema9"]) and math.isfinite(trend["ema21"]))
+t = data.plain_takeaway(105, 103, 102, 104, 62, 104.5, 100.5)
+check("takeaway bullish", "trend is up" in t and "buyers in control" in t
+      and "broke above the morning range" in t)
+t = data.plain_takeaway(95, 97, 98, 96, 25, 104.5, 100.5)
+check("takeaway bearish", "trend is down" in t and "sellers in control" in t
+      and "washed out" in t and "broke below the morning range" in t)
+t = data.plain_takeaway(102, 102.5, 101.5, 102, 75, 104.5, 100.5)
+check("takeaway choppy/overheated",
+      "trend is choppy" in t and "overheated" in t
+      and "inside the morning range" in t)
+t = data.plain_takeaway(float("nan"), float("nan"), float("nan"),
+                        float("nan"), float("nan"))
+check("takeaway no-data fallback", "Not enough data" in t)
 fig = intraday_chart(frame5, "AAPL", signals.demo_signal(df),
                      or_high=or_["high"], or_low=or_["low"], window_label="5 minutes")
 check("intraday chart builds", hasattr(fig, "data") and len(fig.data) > 0)
