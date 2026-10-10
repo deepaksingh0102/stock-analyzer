@@ -10,7 +10,7 @@ import pandas as pd
 import config
 import data
 import signals
-from charts import price_chart, radar_history_figure, forecast_figure
+from charts import intraday_chart, radar_history_figure, forecast_figure
 
 
 def check(name, cond):
@@ -167,15 +167,39 @@ fl = data.order_flow({"bid": 100.0, "ask": 100.05, "bidSize": 100, "askSize": 30
 check("order-flow sell pressure", fl["primary"] < -0.2 and "Sell-side" in fl["label"])
 fl = data.order_flow()
 check("order flow unavailable without sizes", math.isnan(fl["primary"]))
+q, note = data.fetch_quote("AAPL")
+check("fetch_quote returns (quote, note) tuple",
+      isinstance(note, str) and (q is None or isinstance(q, dict)))
 sp = data.spread_info({"bid": 100.0, "ask": 100.10})
 check("spread info", abs(sp["pct"] - 0.09995) < 1e-3)
 check("spread none without quote", data.spread_info(None) is None)
 
 # ---------------------------------------------------------------------------
-# 9. Charts
+# 9. Charts (intraday: EMA9/21, VWAP, opening range)
 # ---------------------------------------------------------------------------
-fig = price_chart(df.tail(126), "AAPL", signals.demo_signal(df))
-check("price chart builds", hasattr(fig, "data") and len(fig.data) > 0)
+frame5 = data.intraday_frame(df5, "5min")
+check("intraday frame has EMA9/21/VWAP/RSI/MACD",
+      all(c in frame5.columns for c in ("EMA9", "EMA21", "VWAP", "RSI", "MACD", "MACDsig"))
+      and frame5["EMA9"].notna().all() and frame5["VWAP"].notna().all())
+frame15 = data.intraday_frame(df5, "15min")
+check("15min resample", len(frame15) > 0 and len(frame15) < len(frame5))
+frame1h = data.intraday_frame(df5, "1h")
+check("1h resample", len(frame1h) > 0 and len(frame1h) < len(frame15))
+frameSess = data.intraday_frame(df5, "session")
+check("session frame = today's bars only",
+      len(frameSess) > 0
+      and (frameSess.index.date == frameSess.index[-1].date()).all())
+or_ = data.opening_range(df5)
+check("opening range high>=low",
+      or_ is not None and or_["high"] >= or_["low"] and or_["minutes"] == 30)
+vs = data.vwap_series(frameSess)
+check("vwap series finite", vs.notna().all() and (vs > 0).all())
+trend = data.current_trend(df5)
+check("intraday trend uses EMA9/21",
+      math.isfinite(trend["ema9"]) and math.isfinite(trend["ema21"]))
+fig = intraday_chart(frame5, "AAPL", signals.demo_signal(df),
+                     or_high=or_["high"], or_low=or_["low"], window_label="5 minutes")
+check("intraday chart builds", hasattr(fig, "data") and len(fig.data) > 0)
 check("radar history chart builds",
       hasattr(radar_history_figure([(pd.Timestamp.now(), 10)]), "data"))
 check("forecast chart builds", hasattr(forecast_figure(fc), "data"))
@@ -188,5 +212,54 @@ if "--live" in sys.argv:
     check(f"live Yahoo data (AAPL last close {live['Close'].iloc[-1]:.2f})", len(live) > 100)
     live5 = data.fetch_intraday("AAPL")
     check(f"live intraday bars ({len(live5)})", len(live5) >= 31)
+
+# ---------------------------------------------------------------------------
+# 9. Tape: tick classification, absorption, velocity, pressure integration
+# ---------------------------------------------------------------------------
+def _mk_trades(n, start_price, step, size, apart=30):
+    base = pd.Timestamp("2026-10-07 09:30")
+    return [{"t": base + pd.Timedelta(seconds=i * apart),
+             "p": start_price + step * i, "s": size} for i in range(n)]
+
+up, dn = data.tick_classify(_mk_trades(20, 100.0, 0.01, 100))
+check("tick classify uptrend", up == 1900 and dn == 0)
+up, dn = data.tick_classify(_mk_trades(20, 100.0, -0.01, 100))
+check("tick classify downtrend", dn == 1900 and up == 0)
+check("tick classify empty", data.tick_classify([]) == (0.0, 0.0))
+
+# Absorption: 10 prints in last 5 min, 2.5x median 5m volume, tiny range, rising
+ab = data.tape_absorption(_mk_trades(40, 100.0, 0.001, 1000), med5_vol=4000.0, atr=1.0)
+check("absorption buyers defending",
+      ab["lean"] == 1 and ab["state"] == "ok" and "buyers" in ab["detail"])
+ab = data.tape_absorption(_mk_trades(40, 100.0, -0.001, 1000), med5_vol=4000.0, atr=1.0)
+check("absorption sellers capping", ab["lean"] == -1 and "sellers" in ab["detail"])
+ab = data.tape_absorption(_mk_trades(40, 100.0, 0.5, 100), med5_vol=4000.0, atr=1.0)
+check("no absorption when proportionate", ab["lean"] == 0 and "proportionate" in ab["detail"])
+ab = data.tape_absorption(_mk_trades(3, 100.0, 0.01, 100), med5_vol=4000.0, atr=1.0)
+check("absorption needs 10+ prints", ab["lean"] == 0 and "need 10+" in ab["detail"])
+
+# Velocity: quiet background then a burst in the last 2 minutes
+_base = pd.Timestamp("2026-10-07 09:30")
+_bg = [{"t": _base + pd.Timedelta(minutes=2 * i), "p": 100.0, "s": 100} for i in range(14)]
+_burst = [{"t": _base + pd.Timedelta(minutes=28, seconds=5 * i),
+           "p": 100.0 + 0.01 * i, "s": 100} for i in range(20)]
+ve = data.tape_velocity(_bg + _burst)
+check("velocity burst detected",
+      ve["state"] == "warn" and ve["lean"] == 1 and "accelerating" in ve["detail"])
+_dense = [{"t": _base + pd.Timedelta(seconds=15 * i), "p": 100.0, "s": 100}
+          for i in range(120)]
+ve = data.tape_velocity(_dense)
+check("velocity normal pace", ve["state"] == "ok" and "normal pace" in ve["detail"])
+
+# Pressure integration: tape leans blend into the composite lean
+pr = data.compute_pressure(df5, df1, atr=1.0, trades=_bg + _burst)
+names = [c["name"] for c in pr["checks"]]
+check("pressure shows tape checks",
+      "Absorption (5 min)" in names and "Tape velocity" in names)
+check("pressure tape read not unavailable",
+      not any("No trade tape" in c["detail"] for c in pr["checks"]))
+pr2 = data.compute_pressure(df5, df1, atr=1.0, trades=None)
+check("pressure degrades without tape",
+      any("No trade tape" in c["detail"] for c in pr2["checks"]))
 
 print("\nAll checks passed. Start the app with:  streamlit run app.py")
