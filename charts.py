@@ -73,11 +73,13 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
     if "RSI" in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI",
                                  line=dict(width=1.5, color="#8b5cf6")), row=4, col=1)
-        fig.add_hline(y=70, line_dash="dot", line_color="#9ca3af", row=4, col=1)
-        fig.add_hline(y=30, line_dash="dot", line_color="#9ca3af", row=4, col=1)
+        fig.add_hline(y=70, line_dash="dot", line_color="#9ca3af", row=4, col=1,
+                      annotation_text="Overbought", annotation_position="top left")
+        fig.add_hline(y=30, line_dash="dot", line_color="#9ca3af", row=4, col=1,
+                      annotation_text="Oversold", annotation_position="bottom left")
 
     fig.update_layout(
-        height=780, margin=dict(l=10, r=10, t=40, b=10),
+        height=680, margin=dict(l=10, r=10, t=40, b=10),
         xaxis_rangeslider_visible=False, hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0),
     )
