@@ -31,6 +31,14 @@ INTRADAY_PERIOD = "5d"
 
 WINDOWS = {"1 month": 21, "3 months": 63, "6 months": 126, "1 year": 252, "2 years": 504}
 
+# Intraday chart timeframes: label -> resample rule ("session" = today's bars).
+INTRADAY_WINDOWS = {
+    "5 minutes": "5min",
+    "15 minutes": "15min",
+    "1 hour": "1h",
+    "Since market open": "session",
+}
+
 NAN = float("nan")
 
 
@@ -261,6 +269,72 @@ def session_bars(df: pd.DataFrame) -> pd.DataFrame:
         return df.iloc[0:0] if df is not None else pd.DataFrame()
     last_date = df.index[-1].date()
     return df[[d.date() == last_date for d in df.index]]
+
+
+def resample_bars(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Resample 5-minute OHLCV bars to a coarser rule ('15min', '1h', ...)."""
+    if df is None or df.empty:
+        return df
+    agg = {"Open": "first", "High": "max", "Low": "min",
+           "Close": "last", "Volume": "sum"}
+    out = df.resample(rule, origin="start_day").agg(agg)
+    return out.dropna(subset=["Open"])
+
+
+def vwap_series(df: pd.DataFrame) -> pd.Series:
+    """Session-anchored VWAP series, resetting at each calendar day."""
+    out = pd.Series(index=df.index, dtype=float)
+    if df is None or df.empty:
+        return out
+    for _day, group in df.groupby(df.index.date):
+        tp = (group["High"] + group["Low"] + group["Close"]) / 3
+        vol = group["Volume"].fillna(0)
+        cum_pv = (tp * vol).cumsum()
+        cum_v = vol.cumsum().replace(0, float("nan"))
+        out.loc[group.index] = (cum_pv / cum_v).values
+    return out
+
+
+def opening_range(df_5m: pd.DataFrame, minutes: int = 30) -> dict | None:
+    """Opening-range high/low from the first `minutes` of today's session.
+
+    Computed from the raw 5-minute bars (first 6 bars = 30 min) so it stays
+    consistent no matter which chart timeframe is displayed.
+    """
+    sess = session_bars(df_5m)
+    if sess is None or sess.empty:
+        return None
+    n_bars = max(1, minutes // 5)
+    orb = sess.iloc[:n_bars]
+    if orb.empty:
+        return None
+    return {"high": float(orb["High"].max()), "low": float(orb["Low"].min()),
+            "minutes": minutes}
+
+
+def intraday_frame(df_5m: pd.DataFrame, window: str) -> pd.DataFrame:
+    """Display frame for the intraday chart: resampled bars + EMA9/21 + VWAP."""
+    if df_5m is None or df_5m.empty:
+        return pd.DataFrame()
+    if window == "session":
+        df = session_bars(df_5m).copy()
+    elif window == "1h":
+        df = resample_bars(df_5m, "1h").tail(100).copy()
+    elif window == "15min":
+        df = resample_bars(df_5m, "15min").tail(160).copy()
+    else:  # "5min"
+        df = df_5m.tail(160).copy()
+    if df.empty:
+        return df
+    closes = df["Close"].astype(float).tolist()
+    df["EMA9"] = ema_series(closes, 9)
+    df["EMA21"] = ema_series(closes, 21)
+    df["VWAP"] = vwap_series(df).values
+    df["RSI"] = rsi_series(closes, 14)
+    df["MACD"] = df["Close"].ewm(span=12, adjust=False).mean() \
+        - df["Close"].ewm(span=26, adjust=False).mean()
+    df["MACDsig"] = df["MACD"].ewm(span=9, adjust=False).mean()
+    return df
 
 
 def _bar_dicts(df: pd.DataFrame) -> list:
@@ -625,7 +699,7 @@ def current_trend(df: pd.DataFrame, latest_price: float | None = None,
     if latest_price is not None and math.isfinite(latest_price):
         closes.append(float(latest_price))
     price = closes[-1] if closes else NAN
-    ema20, ema50, sma20 = ema_last(closes, 20), ema_last(closes, 50), sma_last(closes, 20)
+    ema9, ema21, sma21 = ema_last(closes, 9), ema_last(closes, 21), sma_last(closes, 21)
     rsi = rsi_last(closes, 14)
     macd, sig = macd_last(closes)
     vwap = vwap_last(df)
@@ -635,12 +709,12 @@ def current_trend(df: pd.DataFrame, latest_price: float | None = None,
     vol_ratio = lv / av if math.isfinite(av) and av > 0 else NAN
 
     bull = bear = 0
-    bull += 1 if price > ema20 else 0
-    bear += 1 if not price > ema20 else 0
-    bull += 1 if ema20 > ema50 else 0
-    bear += 1 if not ema20 > ema50 else 0
-    bull += 1 if price > sma20 else 0
-    bear += 1 if not price > sma20 else 0
+    bull += 1 if price > ema9 else 0
+    bear += 1 if not price > ema9 else 0
+    bull += 1 if ema9 > ema21 else 0
+    bear += 1 if not ema9 > ema21 else 0
+    bull += 1 if price > sma21 else 0
+    bear += 1 if not price > sma21 else 0
     if math.isfinite(vwap):
         bull += 1 if price > vwap else 0
         bear += 1 if not price > vwap else 0
@@ -658,8 +732,8 @@ def current_trend(df: pd.DataFrame, latest_price: float | None = None,
         elif bear > bull:
             bear += 0.5
     bias = "Bullish" if bull >= bear + 2 else ("Bearish" if bear >= bull + 2 else "Mixed")
-    return {"bias": bias, "price": price, "ema20": ema20, "ema50": ema50,
-            "sma20": sma20, "rsi": rsi, "macd": macd, "macdSignal": sig,
+    return {"bias": bias, "price": price, "ema9": ema9, "ema21": ema21,
+            "sma21": sma21, "rsi": rsi, "macd": macd, "macdSignal": sig,
             "vwap": vwap, "volRatio": vol_ratio, "bull": bull, "bear": bear}
 
 
@@ -891,9 +965,9 @@ def paired_confirmations(trend: dict, direction: int) -> dict:
     vwap_agree = ((trend["price"] > trend["vwap"]) if direction == 1
                   else (trend["price"] < trend["vwap"])) \
         if math.isfinite(trend.get("vwap", NAN)) else None
-    ema_agree = ((trend["ema20"] > trend["ema50"]) if direction == 1
-                 else (trend["ema20"] < trend["ema50"])) \
-        if math.isfinite(trend.get("ema20", NAN)) and math.isfinite(trend.get("ema50", NAN)) else None
+    ema_agree = ((trend["ema9"] > trend["ema21"]) if direction == 1
+                 else (trend["ema9"] < trend["ema21"])) \
+        if math.isfinite(trend.get("ema9", NAN)) and math.isfinite(trend.get("ema21", NAN)) else None
     return {"vwapVolume": label(vwap_agree, vol_support),
             "emaVolume": label(ema_agree, vol_support)}
 
@@ -1653,12 +1727,12 @@ def provisional_plan(radar: dict | None, df: pd.DataFrame, atr: float,
 
     closes = [b["close"] for b in bars]
     n = len(closes)
-    e20, e50 = ema_series(closes, 20), ema_series(closes, 50)
-    ok = (px > e20[n - 1] and e20[n - 1] > e50[n - 1]) if direction == 1 \
-        else (px < e20[n - 1] and e20[n - 1] < e50[n - 1])
-    part = (px > e20[n - 1]) if direction == 1 else (px < e20[n - 1])
-    add("5-min EMA 20/50 structure", "ok" if ok else ("warn" if part else "fail"),
-        f"price ${px:.2f} · EMA20 ${e20[n - 1]:.2f} · EMA50 ${e50[n - 1]:.2f}")
+    e9, e21 = ema_series(closes, 9), ema_series(closes, 21)
+    ok = (px > e9[n - 1] and e9[n - 1] > e21[n - 1]) if direction == 1 \
+        else (px < e9[n - 1] and e9[n - 1] < e21[n - 1])
+    part = (px > e9[n - 1]) if direction == 1 else (px < e9[n - 1])
+    add("5-min EMA 9/21 structure", "ok" if ok else ("warn" if part else "fail"),
+        f"price ${px:.2f} · EMA9 ${e9[n - 1]:.2f} · EMA21 ${e21[n - 1]:.2f}")
 
     e13 = ema_series(closes, 13)
     last3 = closes[-3:]
@@ -1723,10 +1797,10 @@ def provisional_plan(radar: dict | None, df: pd.DataFrame, atr: float,
         + ("" if db == "Mixed" else (" — with the trade" if aligned_daily
                                     else " — this is a counter-trend trade")))
 
-    ext = abs(px - e20[n - 1]) / atr if atr > 0 else NAN
+    ext = abs(px - e9[n - 1]) / atr if atr > 0 else NAN
     add("Not overextended",
         "ok" if ext <= 2 else ("warn" if ext <= 3 else "fail") if math.isfinite(ext) else "",
-        f"{ext:.1f}× ATR from EMA20 (>2× = chasing; wait for a pullback)"
+        f"{ext:.1f}× ATR from EMA9 (>2× = chasing; wait for a pullback)"
         if math.isfinite(ext) else "n/a")
 
     plan = risk_plan(df, px, direction, atr, bo)
