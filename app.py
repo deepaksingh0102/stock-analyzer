@@ -77,6 +77,31 @@ def load_trades(symbol: str, use_demo: bool, bucket: int = 0):
         return []
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def load_sp500_movers(use_demo: bool, bucket: int = 0):
+    """Top 10 S&P 500 gainers/losers. {"error": msg} on failure."""
+    if use_demo:
+        return data.demo_movers()
+    try:
+        return data.sp500_movers()
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
+def _style_movers(df: pd.DataFrame):
+    """Format movers table: $ price, ±% change, green/red change values."""
+    sty = df.style.format({"Price": "${:,.2f}", "Change %": "{:+.2f}%"})
+    def _color(v):
+        try:
+            return "color: #16a34a" if v > 0 else ("color: #dc2626" if v < 0 else "")
+        except TypeError:
+            return ""
+    try:
+        return sty.map(_color, subset=["Change %"])
+    except Exception:
+        return sty
+
+
 def _bucket(live: bool, refresh_secs: int) -> int:
     return int(time.time() // refresh_secs) if live else 0
 
@@ -141,7 +166,7 @@ with st.sidebar:
 
 
 st.title("📈 Stock Analyzer")
-tab_detail, tab_watch = st.tabs(["Chart & Signal", "Watchlist"])
+tab_detail, tab_movers, tab_watch = st.tabs(["Chart & Signal", "Top Movers", "Watchlist"])
 
 
 def _thresholds():
@@ -539,6 +564,30 @@ def detail_view(symbol: str, tf_name: str, use_demo: bool,
 # Tab 2: watchlist overview
 # ---------------------------------------------------------------------------
 @st.fragment(run_every=refresh_secs if live else None)
+# ---------------------------------------------------------------------------
+# Tab 2: S&P 500 top movers
+# ---------------------------------------------------------------------------
+def movers_view(use_demo: bool, live: bool, refresh_secs: int):
+    st.subheader("S&P 500 — Top Movers of the Day")
+    bucket = _bucket(live, refresh_secs)
+    with st.spinner("Loading S&P 500 movers…"):
+        m = load_sp500_movers(use_demo, bucket)
+    if m.get("error"):
+        st.error(f"Could not load S&P 500 movers: {m['error']}")
+        st.caption("Check your internet connection — this tab needs Yahoo Finance.")
+        return
+    st.caption(f"As of {m['asof']} · source: Yahoo Finance")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**🟢 Top 10 Gainers**")
+        st.dataframe(_style_movers(m["gainers"]), hide_index=True,
+                     use_container_width=True)
+    with c2:
+        st.markdown("**🔴 Top 10 Losers**")
+        st.dataframe(_style_movers(m["losers"]), hide_index=True,
+                     use_container_width=True)
+
+
 def watchlist_view(watchlist_text: str, use_demo: bool,
                    live: bool, refresh_secs: int):
     symbols = [x.strip().upper() for x in watchlist_text.split(",") if x.strip()]
@@ -567,5 +616,7 @@ def watchlist_view(watchlist_text: str, use_demo: bool,
 
 with tab_detail:
     detail_view(symbol, tf_name, use_demo, live, refresh_secs)
+with tab_movers:
+    movers_view(use_demo, live, refresh_secs)
 with tab_watch:
     watchlist_view(watchlist_text, use_demo, live, refresh_secs)
