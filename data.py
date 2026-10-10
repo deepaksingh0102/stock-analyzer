@@ -121,6 +121,57 @@ def fetch_alpaca_bars(symbol: str, timeframe: str = "5Min",
     return df[["Open", "High", "Low", "Close", "Volume"]]
 
 
+def fetch_alpaca_bars_multi(tickers: list, timeframe: str = "1D",
+                            days: int = 5, feed: str | None = None) -> dict:
+    """Multi-symbol bars from Alpaca: {ticker: OHLCV DataFrame}."""
+    import config
+    import requests
+    from datetime import datetime, timedelta, timezone
+
+    feed = feed or _alpaca_feed()
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    out = {}
+    for i in range(0, len(tickers), 100):
+        chunk = tickers[i:i + 100]
+        params = {"symbols": ",".join(chunk), "timeframe": timeframe,
+                  "start": start.isoformat(), "end": end.isoformat(),
+                  "limit": 1000, "feed": feed, "adjustment": "raw"}
+        r = requests.get("https://data.alpaca.markets/v2/stocks/bars",
+                         headers=_alpaca_headers(), params=params, timeout=30)
+        if not r.ok:
+            raise RuntimeError(
+                f"Alpaca multi bars HTTP {r.status_code}: {r.text[:200]}")
+        for sym, bars in (r.json().get("bars") or {}).items():
+            if not bars:
+                continue
+            df = pd.DataFrame(
+                [{"time": pd.Timestamp(b["t"]), "Open": b["o"], "High": b["h"],
+                  "Low": b["l"], "Close": b["c"], "Volume": b["v"]} for b in bars]
+            ).set_index("time").sort_index()
+            if df.index.tz is not None:
+                df.index = df.index.tz_convert("America/New_York").tz_localize(None)
+            out[sym] = df[["Open", "High", "Low", "Close", "Volume"]]
+    return out
+
+
+def _daily_closes_many(tickers: list) -> pd.DataFrame:
+    """Daily closes for many tickers: Alpaca multi-symbol when keys are set,
+    otherwise one batched Yahoo Finance call. Columns = tickers."""
+    if alpaca_is_configured():
+        try:
+            frames = [df["Close"].rename(sym)
+                      for sym, df in fetch_alpaca_bars_multi(tickers).items()]
+            if frames:
+                return pd.concat(frames, axis=1)
+        except Exception:
+            pass  # fall through to Yahoo
+    import yfinance as yf
+    px = yf.download(tickers, period="5d", interval="1d", auto_adjust=True,
+                     progress=False, threads=True)
+    return px["Close"] if isinstance(px.columns, pd.MultiIndex) else px[["Close"]]
+
+
 def fetch_alpaca_quote(symbol: str, feed: str | None = None) -> dict | None:
     """Latest Alpaca quote: bid/ask price AND size (powers order flow + spread)."""
     import config
@@ -371,6 +422,81 @@ def plain_takeaway(price, ema9, ema21, vwap, rsi,
     if not parts:
         return "Not enough data for a chart read right now."
     return "Chart read: " + "; ".join(parts) + "."
+
+
+SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+
+
+def sp500_constituents() -> pd.DataFrame:
+    """S&P 500 constituents: Symbol (Yahoo format), Name. Source: Wikipedia.
+
+    Needs lxml for pd.read_html (listed in requirements.txt).
+    """
+    import requests
+    from io import StringIO
+    resp = requests.get(SP500_WIKI_URL, headers={"User-Agent": "Mozilla/5.0"},
+                        timeout=25)
+    resp.raise_for_status()
+    tables = pd.read_html(StringIO(resp.text))
+    df = tables[0]
+    df.columns = [str(c).strip() for c in df.columns]
+    sym_col = next(c for c in df.columns if "symbol" in c.lower())
+    name_col = next(c for c in df.columns if "security" in c.lower())
+    out = pd.DataFrame({
+        "Symbol": df[sym_col].astype(str).str.strip().str.replace(".", "-", regex=False),
+        "Name": df[name_col].astype(str).str.strip(),
+    })
+    return out.drop_duplicates("Symbol").reset_index(drop=True)
+
+
+def sp500_movers() -> dict:
+    """Top 10 gainers / losers of the S&P 500 by daily % change.
+
+    Membership from Wikipedia; prices from Alpaca multi-symbol bars when keys
+    are set, otherwise one batched Yahoo Finance call.
+
+    Returns {"gainers": df, "losers": df, "asof": "YYYY-MM-DD"} with
+    columns Symbol, Name, Price, Change %.
+    """
+    const = sp500_constituents()
+    tickers = const["Symbol"].tolist()
+    closes = _daily_closes_many(tickers)
+    if closes.empty:
+        raise ValueError("No S&P 500 price data returned.")
+    asof = pd.to_datetime(closes.index[-1]).date().isoformat()
+    name_map = dict(zip(const["Symbol"], const["Name"]))
+    rows = []
+    for t in closes.columns:
+        s = closes[t].dropna()
+        if len(s) < 2:
+            continue
+        prev, last = float(s.iloc[-2]), float(s.iloc[-1])
+        if prev <= 0:
+            continue
+        rows.append({"Symbol": t, "Name": name_map.get(t, t),
+                     "Price": last, "Change %": (last / prev - 1) * 100})
+    if not rows:
+        raise ValueError("No usable S&P 500 price data.")
+    df = pd.DataFrame(rows)
+    return {"gainers": df.nlargest(10, "Change %").reset_index(drop=True),
+            "losers": df.nsmallest(10, "Change %").reset_index(drop=True),
+            "asof": asof}
+
+
+def demo_movers() -> dict:
+    """Synthetic gainers/losers for offline demo mode."""
+    import numpy as np
+    rng = np.random.default_rng(42)
+    syms = [f"DEMO{i:02d}" for i in range(1, 31)]
+    df = pd.DataFrame({
+        "Symbol": syms,
+        "Name": [f"Demo Company {i}" for i in range(1, 31)],
+        "Price": rng.uniform(20, 500, len(syms)).round(2),
+        "Change %": rng.normal(0, 3, len(syms)).round(2),
+    })
+    return {"gainers": df.nlargest(10, "Change %").reset_index(drop=True),
+            "losers": df.nsmallest(10, "Change %").reset_index(drop=True),
+            "asof": "demo data"}
 
 
 def _bar_dicts(df: pd.DataFrame) -> list:
