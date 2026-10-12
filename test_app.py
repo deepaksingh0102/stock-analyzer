@@ -209,6 +209,11 @@ fig_now = intraday_chart(frame5, "AAPL", None, None, None, current_price=105.5)
 _now = [a.text for a in fig_now.layout.annotations
         if a.text and a.text.startswith("Now")]
 check("current-price line annotated", _now == ["Now 105.50"])
+_now_shapes = [s for s in fig_now.layout.shapes if getattr(s, "y0", None) == 105.5]
+check("now line styled visible",
+      len(_now_shapes) == 1 and _now_shapes[0].line.color == "#4b5563"
+      and _now_shapes[0].line.width == 2)
+check("right margin fits now label", fig_now.layout.margin.r >= 50)
 fig_nonow = intraday_chart(frame5, "AAPL")
 _nonow = [a.text for a in fig_nonow.layout.annotations
           if a.text and a.text.startswith("Now")]
@@ -239,6 +244,29 @@ check("demo data already regular-hours",
       len(data.regular_session_only(df5)) == len(df5))
 check("empty frame passes through filter",
       data.regular_session_only(pd.DataFrame()).empty)
+# Trailing-minute frames: last N one-min bars, indicators warmed from history
+check("trailing minutes map",
+      data.TRAILING_MINUTES == {"5 minutes": 5, "15 minutes": 15, "1 hour": 60})
+_dm1 = data.demo_1m("AAPL")
+check("demo 1m generated",
+      len(_dm1) >= 700
+      and ((_dm1.index.hour * 60 + _dm1.index.minute) >= 570).all())
+_idx1 = pd.date_range("2026-10-12 09:30", periods=120, freq="1min")
+_df1m = pd.DataFrame({"Open": 100.0, "High": 100.2, "Low": 99.8,
+                      "Close": 100.1, "Volume": 500}, index=_idx1)
+_tf15 = data.trailing_frame(_df1m, 15)
+check("trailing frame = last 15 one-min bars",
+      len(_tf15) == 15 and _tf15.index[0] == _idx1[-15]
+      and _tf15.index[-1] == _idx1[-1])
+check("trailing indicators warmed from history",
+      _tf15["EMA21"].notna().all() and _tf15["RSI"].notna().all()
+      and _tf15["MACD"].notna().all())
+check("trailing frame empty on no data",
+      data.trailing_frame(None, 15).empty
+      and data.trailing_frame(pd.DataFrame(), 15).empty)
+_cap_t = data.trailing_caption(_tf15, 15)
+check("trailing caption",
+      _cap_t.startswith("Showing last 15 minutes ·") and "1-min bars" in _cap_t)
 or_ = data.opening_range(df5)
 check("opening range high>=low",
       or_ is not None and or_["high"] >= or_["low"] and or_["minutes"] == 30)
