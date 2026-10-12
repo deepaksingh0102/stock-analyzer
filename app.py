@@ -272,13 +272,11 @@ def detail_view(symbol: str, tf_name: str, use_demo: bool,
     else:
         # key includes the timeframe so the chart always re-renders
         # as a fresh element when the selection changes.
-        last_close = float(frame["Close"].iloc[-1])
         st.plotly_chart(intraday_chart(
             frame, symbol, sig,
             or_high=or_["high"] if or_ else None,
             or_low=or_["low"] if or_ else None,
-            window_label=title_label,
-            current_price=last_close),
+            window_label=title_label),
             use_container_width=True,
             key=f"intraday_{symbol}_{tf_name}")
         st.caption(caption)
@@ -295,8 +293,8 @@ def detail_view(symbol: str, tf_name: str, use_demo: bool,
                 "Green = price went up in that slice, red = it went down.\n"
                 "- **Orange & blue lines (EMA 9 / EMA 21)** — the average price over the last "
                 "9 / 21 slices. Price above both = uptrend; below both = downtrend.\n"
-                "- **Gray solid line (Now …)** — the current price. Above the orange/blue "
-                "EMA lines = upside; below them = downside.\n"
+                "- **Dark line (Close)** — the closing price at each point in time. Above "
+                "the orange/blue EMA lines = upside; below them = downside.\n"
                 "- **Purple dashed line (VWAP)** — the day's average price, weighted by volume. "
                 "Big traders judge themselves against it: above it = buyers winning.\n"
                 "- **Green / red dashed lines** — the highest and lowest price of the first "
