@@ -367,17 +367,23 @@ def opening_range(df_5m: pd.DataFrame, minutes: int = 30) -> dict | None:
 
 
 def intraday_frame(df_5m: pd.DataFrame, window: str) -> pd.DataFrame:
-    """Display frame for the intraday chart: resampled bars + EMA9/21 + VWAP."""
+    """Display frame for the intraday chart: resampled bars + EMA9/21 + VWAP.
+
+    The timeframe only changes the candle size — the chart always shows the
+    most recent session. Indicators are computed on the full multi-day
+    history first (warm-up), then the frame is sliced to the latest session
+    for display, so EMA/RSI/MACD stay meaningful on thin views like hourly.
+    """
     if df_5m is None or df_5m.empty:
         return pd.DataFrame()
     if window == "session":
         df = session_bars(df_5m).copy()
     elif window == "1h":
-        df = resample_bars(df_5m, "1h").tail(100).copy()
+        df = resample_bars(df_5m, "1h").copy()
     elif window == "15min":
-        df = resample_bars(df_5m, "15min").tail(160).copy()
+        df = resample_bars(df_5m, "15min").copy()
     else:  # "5min"
-        df = df_5m.tail(160).copy()
+        df = df_5m.copy()
     if df.empty:
         return df
     closes = df["Close"].astype(float).tolist()
@@ -388,7 +394,10 @@ def intraday_frame(df_5m: pd.DataFrame, window: str) -> pd.DataFrame:
     df["MACD"] = df["Close"].ewm(span=12, adjust=False).mean() \
         - df["Close"].ewm(span=26, adjust=False).mean()
     df["MACDsig"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    return df
+    # Display only the most recent session; the indicators above already
+    # carry the multi-day warm-up.
+    last_date = df.index[-1].date()
+    return df[[d.date() == last_date for d in df.index]]
 
 
 # Human-readable bar size per chart timeframe (for captions / explainer text).
