@@ -205,6 +205,32 @@ check("session caption = 5-minute bars, single day",
       capSess.startswith("Showing 5-minute bars ·") and "→" not in capSess)
 capEmpty = data.frame_caption(pd.DataFrame(), "5 minutes")
 check("empty frame caption", "no data" in capEmpty)
+# Regular-session filter: pre-market bars dropped on naive (Eastern) index
+_pm5 = pd.date_range("2026-10-12 04:00", periods=12, freq="5min")
+_rg5 = pd.date_range("2026-10-12 09:30", periods=12, freq="5min")
+_mix5 = pd.DataFrame({"Open": 100.0, "High": 101.0, "Low": 99.0,
+                      "Close": 100.5, "Volume": 1000},
+                     index=_pm5.append(_rg5))
+_f5 = data.regular_session_only(_mix5)
+check("pre-market bars filtered (naive Eastern)",
+      len(_f5) == 12 and _f5.index[0] == _rg5[0])
+_or5 = data.opening_range(_f5)
+check("opening range anchors to 9:30 open",
+      _or5 is not None and _or5["high"] == 101.0 and _or5["low"] == 99.0
+      and _or5["minutes"] == 30)
+# tz-aware input is converted to Eastern before filtering
+_pm_utc = pd.date_range("2026-10-12 08:00", periods=12, freq="5min", tz="UTC")    # 04:00 ET
+_rg_utc = pd.date_range("2026-10-12 13:30", periods=12, freq="5min", tz="UTC")    # 09:30 ET
+_mix_utc = pd.DataFrame({"Open": 100.0, "High": 101.0, "Low": 99.0,
+                         "Close": 100.5, "Volume": 1000},
+                        index=_pm_utc.append(_rg_utc))
+_fz = data.regular_session_only(_mix_utc)
+check("tz-aware bars converted to Eastern",
+      len(_fz) == 12 and _fz.index[0] == _rg_utc[0])
+check("demo data already regular-hours",
+      len(data.regular_session_only(df5)) == len(df5))
+check("empty frame passes through filter",
+      data.regular_session_only(pd.DataFrame()).empty)
 or_ = data.opening_range(df5)
 check("opening range high>=low",
       or_ is not None and or_["high"] >= or_["low"] and or_["minutes"] == 30)
