@@ -258,11 +258,16 @@ def detail_view(symbol: str, tf_name: str, use_demo: bool,
     if frame.empty:
         st.info("Not enough intraday data to draw the chart.")
     else:
+        # key includes the timeframe so the chart always re-renders
+        # as a fresh element when the selection changes.
         st.plotly_chart(intraday_chart(
             frame, symbol, sig,
             or_high=or_["high"] if or_ else None,
             or_low=or_["low"] if or_ else None,
-            window_label=tf_name), use_container_width=True)
+            window_label=tf_name),
+            use_container_width=True,
+            key=f"intraday_{symbol}_{tf_name}")
+        st.caption(data.frame_caption(frame, tf_name))
         # Plain-English takeaway for novices
         last = frame.iloc[-1]
         px = live_px if live_px else res["entry"]
@@ -271,7 +276,8 @@ def detail_view(symbol: str, tf_name: str, use_demo: bool,
             or_["high"] if or_ else None, or_["low"] if or_ else None))
         with st.expander("How to read this chart"):
             st.write(
-                "- **Candles** — each one is a slice of time (5 min, 15 min, or 1 hour). "
+                f"- **Candles** — each one is a {data.TIMEFRAME_BAR_WORD.get(tf_name, '5-minute')} "
+                "slice of time. "
                 "Green = price went up in that slice, red = it went down.\n"
                 "- **Orange & blue lines (EMA 9 / EMA 21)** — the average price over the last "
                 "9 / 21 slices. Price above both = uptrend; below both = downtrend.\n"
