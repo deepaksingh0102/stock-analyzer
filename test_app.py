@@ -189,10 +189,15 @@ frameSess = data.intraday_frame(df5, "session")
 check("session frame = today's bars only",
       len(frameSess) > 0
       and (frameSess.index.date == frameSess.index[-1].date()).all())
+for _label, _fr in (("5min", frame5), ("15min", frame15), ("1h", frame1h)):
+    check(f"{_label} frame shows most recent session only",
+          len(_fr) > 0 and (_fr.index.date == _fr.index[-1].date()).all())
+check("hourly indicators warmed up from history",
+      frame1h["EMA21"].notna().all() and frame1h["RSI"].notna().all()
+      and frame1h["MACD"].notna().all())
 cap15 = data.frame_caption(frame15, "15 minutes")
-check("caption names 15-minute bars + span",
-      cap15.startswith("Showing 15-minute bars ·")
-      and "bars ·" in cap15 and "→" in cap15)
+check("caption names 15-minute bars, single session",
+      cap15.startswith("Showing 15-minute bars ·") and "→" not in cap15)
 cap1h = data.frame_caption(frame1h, "1 hour")
 check("caption names 1-hour bars", cap1h.startswith("Showing 1-hour bars ·"))
 capSess = data.frame_caption(frameSess, "Since market open")
