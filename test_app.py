@@ -189,6 +189,17 @@ frameSess = data.intraday_frame(df5, "session")
 check("session frame = today's bars only",
       len(frameSess) > 0
       and (frameSess.index.date == frameSess.index[-1].date()).all())
+cap15 = data.frame_caption(frame15, "15 minutes")
+check("caption names 15-minute bars + span",
+      cap15.startswith("Showing 15-minute bars ·")
+      and "bars ·" in cap15 and "→" in cap15)
+cap1h = data.frame_caption(frame1h, "1 hour")
+check("caption names 1-hour bars", cap1h.startswith("Showing 1-hour bars ·"))
+capSess = data.frame_caption(frameSess, "Since market open")
+check("session caption = 5-minute bars, single day",
+      capSess.startswith("Showing 5-minute bars ·") and "→" not in capSess)
+capEmpty = data.frame_caption(pd.DataFrame(), "5 minutes")
+check("empty frame caption", "no data" in capEmpty)
 or_ = data.opening_range(df5)
 check("opening range high>=low",
       or_ is not None and or_["high"] >= or_["low"] and or_["minutes"] == 30)
@@ -286,6 +297,8 @@ ve = data.tape_velocity(_dense)
 check("velocity normal pace", ve["state"] == "ok" and "normal pace" in ve["detail"])
 
 # Pressure integration: tape leans blend into the composite lean
+# (df1 = None: demo mode has no 1-minute bars, same as load_1m in app.py)
+df1 = None
 pr = data.compute_pressure(df5, df1, atr=1.0, trades=_bg + _burst)
 names = [c["name"] for c in pr["checks"]]
 check("pressure shows tape checks",
