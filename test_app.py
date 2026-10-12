@@ -205,6 +205,14 @@ check("session caption = 5-minute bars, single day",
       capSess.startswith("Showing 5-minute bars ·") and "→" not in capSess)
 capEmpty = data.frame_caption(pd.DataFrame(), "5 minutes")
 check("empty frame caption", "no data" in capEmpty)
+fig_now = intraday_chart(frame5, "AAPL", None, None, None, current_price=105.5)
+_now = [a.text for a in fig_now.layout.annotations
+        if a.text and a.text.startswith("Now")]
+check("current-price line annotated", _now == ["Now 105.50"])
+fig_nonow = intraday_chart(frame5, "AAPL")
+_nonow = [a.text for a in fig_nonow.layout.annotations
+          if a.text and a.text.startswith("Now")]
+check("no current-price line when not passed", _nonow == [])
 # Regular-session filter: pre-market bars dropped on naive (Eastern) index
 _pm5 = pd.date_range("2026-10-12 04:00", periods=12, freq="5min")
 _rg5 = pd.date_range("2026-10-12 09:30", periods=12, freq="5min")
