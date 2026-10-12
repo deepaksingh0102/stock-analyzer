@@ -428,13 +428,12 @@ def intraday_frame(df_5m: pd.DataFrame, window: str) -> pd.DataFrame:
     """
     if df_5m is None or df_5m.empty:
         return pd.DataFrame()
-    if window == "session":
-        df = session_bars(df_5m).copy()
-    elif window == "1h":
+    if window == "1h":
         df = resample_bars(df_5m, "1h").copy()
     elif window == "15min":
         df = resample_bars(df_5m, "15min").copy()
-    else:  # "5min"
+    else:  # "5min" or "session": full 5-minute history; sliced to the
+        # latest session below after indicators are warmed up.
         df = df_5m.copy()
     if df.empty:
         return df
