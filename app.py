@@ -52,7 +52,7 @@ def load_intraday(symbol: str, use_demo: bool, bucket: int = 0) -> pd.DataFrame:
 @st.cache_data(ttl=600, show_spinner=False)
 def load_1m(symbol: str, use_demo: bool, bucket: int = 0):
     if use_demo:
-        return None
+        return data.demo_1m(symbol)
     try:
         return data.fetch_1m(symbol)
     except Exception:
@@ -252,8 +252,20 @@ def detail_view(symbol: str, tf_name: str, use_demo: bool,
             st.caption(f"Conviction: **{sc['conviction']}** "
                        f"({sc['supports']} support / {sc['contradicts']} contradict)")
 
-    # Intraday chart: EMA9/21 + VWAP + opening-range high/low
-    frame = data.intraday_frame(df_5m, data.INTRADAY_WINDOWS[tf_name])
+    # Intraday chart: EMA9/21 + VWAP + opening-range high/low.
+    # Trailing views ("5 minutes" etc.) show the last N minutes as 1-minute
+    # candles; "Since market open" shows today's session as 5-minute candles.
+    if tf_name in data.TRAILING_MINUTES:
+        mins = data.TRAILING_MINUTES[tf_name]
+        frame = data.trailing_frame(df_1m, mins)
+        caption = data.trailing_caption(frame, mins)
+        candle_word = "1-minute"
+        title_label = f"last {mins} minutes"
+    else:
+        frame = data.intraday_frame(df_5m, data.INTRADAY_WINDOWS[tf_name])
+        caption = data.frame_caption(frame, tf_name)
+        candle_word = data.TIMEFRAME_BAR_WORD.get(tf_name, "5-minute")
+        title_label = tf_name
     or_ = data.opening_range(df_5m)
     if frame.empty:
         st.info("Not enough intraday data to draw the chart.")
@@ -265,11 +277,11 @@ def detail_view(symbol: str, tf_name: str, use_demo: bool,
             frame, symbol, sig,
             or_high=or_["high"] if or_ else None,
             or_low=or_["low"] if or_ else None,
-            window_label=tf_name,
+            window_label=title_label,
             current_price=last_close),
             use_container_width=True,
             key=f"intraday_{symbol}_{tf_name}")
-        st.caption(data.frame_caption(frame, tf_name))
+        st.caption(caption)
         # Plain-English takeaway for novices
         last = frame.iloc[-1]
         px = live_px if live_px else res["entry"]
@@ -278,7 +290,7 @@ def detail_view(symbol: str, tf_name: str, use_demo: bool,
             or_["high"] if or_ else None, or_["low"] if or_ else None))
         with st.expander("How to read this chart"):
             st.write(
-                f"- **Candles** — each one is a {data.TIMEFRAME_BAR_WORD.get(tf_name, '5-minute')} "
+                f"- **Candles** — each one is a {candle_word} "
                 "slice of time. "
                 "Green = price went up in that slice, red = it went down.\n"
                 "- **Orange & blue lines (EMA 9 / EMA 21)** — the average price over the last "
