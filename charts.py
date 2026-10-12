@@ -7,7 +7,8 @@ from signals import Signal
 
 def intraday_chart(df, symbol: str, signal: Signal | None = None,
                    or_high: float | None = None, or_low: float | None = None,
-                   window_label: str = "") -> go.Figure:
+                   window_label: str = "",
+                   current_price: float | None = None) -> go.Figure:
     """Intraday candles + EMA9/21, VWAP, opening-range lines, volume, MACD, RSI."""
     import math
     title = f"{symbol} — {window_label}" if window_label else f"{symbol} intraday"
@@ -41,6 +42,13 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
         fig.add_hline(y=or_low, line_dash="dash", line_color="#dc2626", row=1, col=1,
                       annotation_text=f"OR low {or_low:,.2f}",
                       annotation_position="bottom left")
+
+    # Current-price line (last close) — compare against EMA 9/21 at a glance.
+    if current_price is not None and math.isfinite(current_price):
+        fig.add_hline(y=current_price, line_dash="solid", line_color="#6b7280",
+                      line_width=1.5, row=1, col=1,
+                      annotation_text=f"Now {current_price:,.2f}",
+                      annotation_position="bottom right")
 
     # Entry / exit levels from the signal
     if signal and signal.action in ("BUY", "SELL"):
