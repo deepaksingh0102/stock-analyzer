@@ -210,31 +210,36 @@ def fetch_prices(symbol: str) -> pd.DataFrame:
 
 
 def fetch_intraday(symbol: str, period: str = INTRADAY_PERIOD) -> pd.DataFrame:
-    """5-minute bars (regular session): Alpaca when keys are set, else Yahoo."""
+    """5-minute bars, regular session only (9:30–16:00 ET).
+
+    Alpaca when keys are set, else Yahoo.
+    """
     if alpaca_is_configured():
-        return fetch_alpaca_bars(symbol, timeframe="5Min", days=7, limit=1000)
+        df = fetch_alpaca_bars(symbol, timeframe="5Min", days=7, limit=1000)
+    else:
+        import yfinance as yf
 
-    import yfinance as yf
-
-    df = yf.Ticker(symbol).history(period=period, interval="5m", auto_adjust=True,
-                                   prepost=False)
-    if df is None or df.empty:
-        raise ValueError(f"No intraday data found for '{symbol}'.")
-    return _clean_ohlc(df)
+        df = yf.Ticker(symbol).history(period=period, interval="5m", auto_adjust=True,
+                                       prepost=False)
+        if df is None or df.empty:
+            raise ValueError(f"No intraday data found for '{symbol}'.")
+        df = _clean_ohlc(df)
+    return regular_session_only(df)
 
 
 def fetch_1m(symbol: str) -> pd.DataFrame:
-    """1-minute bars (last ~2 days) for the fast-momentum check."""
+    """1-minute bars (last ~2 days, regular session) for the fast-momentum check."""
     if alpaca_is_configured():
-        return fetch_alpaca_bars(symbol, timeframe="1Min", days=3, limit=1000)
+        df = fetch_alpaca_bars(symbol, timeframe="1Min", days=3, limit=1000)
+    else:
+        import yfinance as yf
 
-    import yfinance as yf
-
-    df = yf.Ticker(symbol).history(period="2d", interval="1m", auto_adjust=True,
-                                   prepost=False)
-    if df is None or df.empty:
-        return df
-    return _clean_ohlc(df)
+        df = yf.Ticker(symbol).history(period="2d", interval="1m", auto_adjust=True,
+                                       prepost=False)
+        if df is None or df.empty:
+            return df
+        df = _clean_ohlc(df)
+    return regular_session_only(df)
 
 
 def fetch_quote(symbol: str) -> tuple[dict | None, str]:
@@ -323,6 +328,22 @@ def session_bars(df: pd.DataFrame) -> pd.DataFrame:
         return df.iloc[0:0] if df is not None else pd.DataFrame()
     last_date = df.index[-1].date()
     return df[[d.date() == last_date for d in df.index]]
+
+
+def regular_session_only(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only regular-session bars (9:30 AM–4:00 PM US/Eastern).
+
+    Alpaca returns pre/post-market bars; Yahoo is fetched with
+    prepost=False. Filtering centrally keeps both feeds consistent so the
+    opening range, VWAP anchor, and session slicing all start at the 9:30
+    open. Naive indexes are treated as Eastern wall-clock (both fetch paths
+    normalize to that); tz-aware indexes are converted first.
+    """
+    if df is None or df.empty:
+        return df
+    idx = df.index.tz_convert("America/New_York") if df.index.tz is not None else df.index
+    mins = idx.hour * 60 + idx.minute
+    return df[(mins >= 9 * 60 + 30) & (mins < 16 * 60)]
 
 
 def resample_bars(df: pd.DataFrame, rule: str) -> pd.DataFrame:
