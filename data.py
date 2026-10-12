@@ -39,6 +39,15 @@ INTRADAY_WINDOWS = {
     "Since market open": "session",
 }
 
+# Trailing-minute chart views: label -> trailing window in minutes.
+# These render as 1-minute candles (see trailing_frame); "Since market open"
+# keeps the session view above.
+TRAILING_MINUTES = {
+    "5 minutes": 5,
+    "15 minutes": 15,
+    "1 hour": 60,
+}
+
 NAN = float("nan")
 
 
@@ -307,6 +316,28 @@ def demo_intraday(symbol: str, days: int = 3, bars_per_day: int = 78) -> pd.Data
     return pd.concat(frames)
 
 
+def demo_1m(symbol: str, days: int = 2, bars_per_day: int = 390) -> pd.DataFrame:
+    """Fake 1-minute bars (regular-session hours) for offline testing."""
+    rng = np.random.default_rng(zlib.crc32((symbol + ":1m").encode()))
+    dates = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=days)
+    frames = []
+    price = 100.0
+    for day in dates:
+        idx = pd.date_range(day + pd.Timedelta(hours=9, minutes=30),
+                            periods=bars_per_day, freq="1min")
+        rets = rng.normal(0.00003, 0.0008, bars_per_day)
+        closes = price * np.exp(np.cumsum(rets))
+        opens = np.r_[closes[0] / (1 + rets[0]), closes[:-1]]
+        highs = np.maximum(opens, closes) * (1 + np.abs(rng.normal(0, 0.0004, bars_per_day)))
+        lows = np.minimum(opens, closes) * (1 - np.abs(rng.normal(0, 0.0004, bars_per_day)))
+        vols = rng.integers(2_000, 40_000, bars_per_day)
+        frames.append(pd.DataFrame(
+            {"Open": opens, "High": highs, "Low": lows, "Close": closes, "Volume": vols},
+            index=idx))
+        price = closes[-1]
+    return pd.concat(frames)
+
+
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
@@ -445,6 +476,42 @@ def frame_caption(df: pd.DataFrame, tf_name: str) -> str:
     if end.date() != start.date():
         span += f" → {end:%b} {end.day}"
     return f"Showing {bar_word} bars · {n} bars · {span}"
+
+
+def trailing_frame(df_1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
+    """Last `minutes` of 1-minute bars + EMA9/21, VWAP, RSI, MACD.
+
+    Indicators are warmed up on the full multi-day 1-minute history first,
+    then the frame is sliced to the trailing window, so they stay meaningful
+    on short views like the last 5 minutes.
+    """
+    if df_1m is None or df_1m.empty:
+        return pd.DataFrame()
+    df = df_1m.copy()
+    closes = df["Close"].astype(float).tolist()
+    df["EMA9"] = ema_series(closes, 9)
+    df["EMA21"] = ema_series(closes, 21)
+    df["VWAP"] = vwap_series(df).values
+    df["RSI"] = rsi_series(closes, 14)
+    df["MACD"] = df["Close"].ewm(span=12, adjust=False).mean() \
+        - df["Close"].ewm(span=26, adjust=False).mean()
+    df["MACDsig"] = df["MACD"].ewm(span=9, adjust=False).mean()
+    return df.tail(minutes)
+
+
+def trailing_caption(df: pd.DataFrame, minutes: int) -> str:
+    """One-line description of a trailing-minute chart view.
+
+    e.g. 'Showing last 15 minutes · 15 1-min bars · Oct 12'.
+    """
+    n = 0 if df is None or df.empty else len(df)
+    if n == 0:
+        return f"Showing last {minutes} minutes · no data"
+    start, end = df.index[0], df.index[-1]
+    span = f"{start:%b} {start.day}"
+    if end.date() != start.date():
+        span += f" → {end:%b} {end.day}"
+    return f"Showing last {minutes} minutes · {n} 1-min bars · {span}"
 
 
 def plain_takeaway(price, ema9, ema21, vwap, rsi,
