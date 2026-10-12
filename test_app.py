@@ -205,19 +205,15 @@ check("session caption = 5-minute bars, single day",
       capSess.startswith("Showing 5-minute bars ·") and "→" not in capSess)
 capEmpty = data.frame_caption(pd.DataFrame(), "5 minutes")
 check("empty frame caption", "no data" in capEmpty)
-fig_now = intraday_chart(frame5, "AAPL", None, None, None, current_price=105.5)
-_now = [a.text for a in fig_now.layout.annotations
-        if a.text and a.text.startswith("Now")]
-check("current-price line annotated", _now == ["Now 105.50"])
-_now_shapes = [s for s in fig_now.layout.shapes if getattr(s, "y0", None) == 105.5]
-check("now line styled visible",
-      len(_now_shapes) == 1 and _now_shapes[0].line.color == "#4b5563"
-      and _now_shapes[0].line.width == 2)
-check("right margin fits now label", fig_now.layout.margin.r >= 50)
-fig_nonow = intraday_chart(frame5, "AAPL")
-_nonow = [a.text for a in fig_nonow.layout.annotations
-          if a.text and a.text.startswith("Now")]
-check("no current-price line when not passed", _nonow == [])
+fig_c = intraday_chart(frame5, "AAPL")
+_close = [t for t in fig_c.data if getattr(t, "name", "") == "Close"]
+check("close price line present",
+      len(_close) == 1 and _close[0].line.color == "#1f2937")
+check("close line follows closes",
+      list(_close[0].y) == list(frame5["Close"]))
+check("horizontal now line removed",
+      not any(a.text and a.text.startswith("Now")
+              for a in fig_c.layout.annotations))
 # Regular-session filter: pre-market bars dropped on naive (Eastern) index
 _pm5 = pd.date_range("2026-10-12 04:00", periods=12, freq="5min")
 _rg5 = pd.date_range("2026-10-12 09:30", periods=12, freq="5min")
@@ -267,6 +263,9 @@ check("trailing frame empty on no data",
 _cap_t = data.trailing_caption(_tf15, 15)
 check("trailing caption",
       _cap_t.startswith("Showing last 15 minutes ·") and "1-min bars" in _cap_t)
+check("session RSI warmed from history (no 10:40 gap)",
+      frameSess["RSI"].notna().all() and frameSess["EMA21"].notna().all()
+      and frameSess["MACD"].notna().all())
 or_ = data.opening_range(df5)
 check("opening range high>=low",
       or_ is not None and or_["high"] >= or_["low"] and or_["minutes"] == 30)
