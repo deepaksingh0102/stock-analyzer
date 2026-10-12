@@ -391,6 +391,32 @@ def intraday_frame(df_5m: pd.DataFrame, window: str) -> pd.DataFrame:
     return df
 
 
+# Human-readable bar size per chart timeframe (for captions / explainer text).
+TIMEFRAME_BAR_WORD = {
+    "5 minutes": "5-minute",
+    "15 minutes": "15-minute",
+    "1 hour": "1-hour",
+    "Since market open": "5-minute",
+}
+
+
+def frame_caption(df: pd.DataFrame, tf_name: str) -> str:
+    """One-line description of what the intraday chart is displaying.
+
+    e.g. 'Showing 15-minute bars · 78 bars · Oct 8 → Oct 12'.
+    Shown under the chart so the chosen timeframe's effect is explicit.
+    """
+    bar_word = TIMEFRAME_BAR_WORD.get(tf_name, tf_name)
+    n = 0 if df is None or df.empty else len(df)
+    if n == 0:
+        return f"Showing {bar_word} bars · no data"
+    start, end = df.index[0], df.index[-1]
+    span = f"{start:%b} {start.day}"
+    if end.date() != start.date():
+        span += f" → {end:%b} {end.day}"
+    return f"Showing {bar_word} bars · {n} bars · {span}"
+
+
 def plain_takeaway(price, ema9, ema21, vwap, rsi,
                    or_high=None, or_low=None) -> str:
     """One-line plain-English read of the intraday chart for novices."""
