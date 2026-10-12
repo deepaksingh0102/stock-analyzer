@@ -45,8 +45,8 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
 
     # Current-price line (last close) — compare against EMA 9/21 at a glance.
     if current_price is not None and math.isfinite(current_price):
-        fig.add_hline(y=current_price, line_dash="solid", line_color="#6b7280",
-                      line_width=1.5, row=1, col=1,
+        fig.add_hline(y=current_price, line_dash="solid", line_color="#4b5563",
+                      line_width=2, row=1, col=1,
                       annotation_text=f"Now {current_price:,.2f}",
                       annotation_position="bottom right")
 
@@ -87,7 +87,7 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
                       annotation_text="Oversold", annotation_position="bottom left")
 
     fig.update_layout(
-        height=680, margin=dict(l=10, r=10, t=40, b=10),
+        height=680, margin=dict(l=10, r=55, t=40, b=10),
         xaxis_rangeslider_visible=False, hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0),
     )
