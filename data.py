@@ -31,22 +31,7 @@ INTRADAY_PERIOD = "5d"
 
 WINDOWS = {"1 month": 21, "3 months": 63, "6 months": 126, "1 year": 252, "2 years": 504}
 
-# Intraday chart timeframes: label -> resample rule ("session" = today's bars).
-INTRADAY_WINDOWS = {
-    "5 minutes": "5min",
-    "15 minutes": "15min",
-    "1 hour": "1h",
-    "Since market open": "session",
-}
-
-# Trailing-minute chart views: label -> trailing window in minutes.
-# These render as 1-minute candles (see trailing_frame); "Since market open"
-# keeps the session view above.
-TRAILING_MINUTES = {
-    "5 minutes": 5,
-    "15 minutes": 15,
-    "1 hour": 60,
-}
+# (The intraday chart always shows today's session as 5-minute bars.)
 
 NAN = float("nan")
 
@@ -475,42 +460,6 @@ def frame_caption(df: pd.DataFrame, tf_name: str) -> str:
     if end.date() != start.date():
         span += f" → {end:%b} {end.day}"
     return f"Showing {bar_word} bars · {n} bars · {span}"
-
-
-def trailing_frame(df_1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
-    """Last `minutes` of 1-minute bars + EMA9/21, VWAP, RSI, MACD.
-
-    Indicators are warmed up on the full multi-day 1-minute history first,
-    then the frame is sliced to the trailing window, so they stay meaningful
-    on short views like the last 5 minutes.
-    """
-    if df_1m is None or df_1m.empty:
-        return pd.DataFrame()
-    df = df_1m.copy()
-    closes = df["Close"].astype(float).tolist()
-    df["EMA9"] = ema_series(closes, 9)
-    df["EMA21"] = ema_series(closes, 21)
-    df["VWAP"] = vwap_series(df).values
-    df["RSI"] = rsi_series(closes, 14)
-    df["MACD"] = df["Close"].ewm(span=12, adjust=False).mean() \
-        - df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACDsig"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    return df.tail(minutes)
-
-
-def trailing_caption(df: pd.DataFrame, minutes: int) -> str:
-    """One-line description of a trailing-minute chart view.
-
-    e.g. 'Showing last 15 minutes · 15 1-min bars · Oct 12'.
-    """
-    n = 0 if df is None or df.empty else len(df)
-    if n == 0:
-        return f"Showing last {minutes} minutes · no data"
-    start, end = df.index[0], df.index[-1]
-    span = f"{start:%b} {start.day}"
-    if end.date() != start.date():
-        span += f" → {end:%b} {end.day}"
-    return f"Showing last {minutes} minutes · {n} 1-min bars · {span}"
 
 
 def plain_takeaway(price, ema9, ema21, vwap, rsi,
