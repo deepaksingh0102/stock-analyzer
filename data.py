@@ -404,6 +404,8 @@ def intraday_frame(df_5m: pd.DataFrame, window: str) -> pd.DataFrame:
         df = resample_bars(df_5m, "1h").copy()
     elif window == "15min":
         df = resample_bars(df_5m, "15min").copy()
+    elif window == "5min":
+        df = resample_bars(df_5m, "5min").copy()
     else:  # "session": full history as-is; sliced to the latest session
         # below after indicators are warmed up.
         df = df_5m.copy()
@@ -427,6 +429,7 @@ def intraday_frame(df_5m: pd.DataFrame, window: str) -> pd.DataFrame:
 # The chart always shows 1-minute bars now; the other entries are kept for
 # the resampled views (15-min / 1-hour) and the caption tests.
 TIMEFRAME_BAR_WORD = {
+    "1 minute": "1-minute",
     "5 minutes": "5-minute",
     "15 minutes": "15-minute",
     "1 hour": "1-hour",
