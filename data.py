@@ -100,7 +100,7 @@ def fetch_alpaca_bars(symbol: str, timeframe: str = "5Min",
               "end": end.isoformat(), "limit": limit, "feed": feed,
               "adjustment": "raw"}
     r = requests.get("https://data.alpaca.markets/v2/stocks/" + symbol + "/bars",
-                     headers=_alpaca_headers(), params=params, timeout=20)
+                     headers=_alpaca_headers(), params=params, timeout=10)
     if not r.ok:
         raise RuntimeError(f"Alpaca bars ({timeframe}) HTTP {r.status_code}: {r.text[:200]}")
     bars = r.json().get("bars") or []
@@ -224,9 +224,14 @@ def fetch_intraday(symbol: str, period: str = INTRADAY_PERIOD) -> pd.DataFrame:
 
 
 def fetch_1m(symbol: str) -> pd.DataFrame:
-    """1-minute bars (last ~2 days, regular session) for the fast-momentum check."""
+    """1-minute bars (last ~2 days, regular session) for the fast-momentum check.
+
+    limit=120: compute_pressure only needs ~20 bars (EMA5 slope + ATR14),
+    and the most recent 120 bars still cover early-morning sessions via the
+    prior day. The old limit=1000 made this the heaviest call per refresh.
+    """
     if alpaca_is_configured():
-        df = fetch_alpaca_bars(symbol, timeframe="1Min", days=3, limit=1000)
+        df = fetch_alpaca_bars(symbol, timeframe="1Min", days=3, limit=120)
     else:
         import yfinance as yf
 
