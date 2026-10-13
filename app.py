@@ -6,6 +6,7 @@ hard-gate verdict, confirmation scorecard, Direction Radar, pressure checks,
 45-minute direction forecast, and mechanical trade planning.
 """
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import time
 
 import pandas as pd
@@ -30,6 +31,20 @@ except Exception:
 
 st.set_page_config(page_title="Stock Analyzer", page_icon="📈", layout="wide",
                    initial_sidebar_state="collapsed")
+
+
+ET = ZoneInfo("America/New_York")
+
+
+def _now_et() -> datetime:
+    """Naive wall-clock time in US Eastern (market time).
+
+    Streamlit Cloud servers run on UTC, so plain datetime.now() labels
+    charts ~4-5 hours ahead of market time. All displayed times use ET,
+    matching the main chart's axis. Kept naive (tzinfo stripped) so it
+    stays comparable with history entries stamped before this fix.
+    """
+    return datetime.now(ET).replace(tzinfo=None)
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +211,7 @@ def detail_view(symbol: str, use_demo: bool,
         return
     if live:
         st.caption(f"🟢 Live tracking on — refreshing every {refresh_secs}s · "
-                   f"last updated {datetime.now().strftime('%H:%M:%S')}")
+                   f"last updated {_now_et().strftime('%H:%M:%S')} ET")
     bucket = _bucket(live, refresh_secs)
     try:
         with st.spinner(f"Loading {symbol}…"):
@@ -229,7 +244,7 @@ def detail_view(symbol: str, use_demo: bool,
     hist_key = f"radar_hist_{symbol}"
     hist = st.session_state.setdefault(hist_key, [])
     if res["radar"]:
-        now = datetime.now()
+        now = _now_et()
         if not hist or (now - hist[-1][0]).total_seconds() >= 30:
             hist.append((now, res["radar"]["score"]))
             del hist[:-360]
