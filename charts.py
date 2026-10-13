@@ -18,22 +18,31 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
         subplot_titles=(title, "Volume", "MACD", "RSI (momentum)"),
     )
 
+    # Candles are translucent so the EMA lines read through them: on a dense
+    # 1-minute chart (390 candles) fully opaque bodies bury the EMAs. The
+    # outlines stay near-opaque so each candle's direction still reads.
     fig.add_trace(go.Candlestick(
         x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
         name="Price",
+        increasing_fillcolor="rgba(38,166,154,0.45)",
+        increasing_line_color="rgba(38,166,154,0.85)",
+        decreasing_fillcolor="rgba(239,83,80,0.45)",
+        decreasing_line_color="rgba(239,83,80,0.85)",
     ), row=1, col=1)
     # Close-price line: price through time, for direct comparison with EMA 9/21.
     fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Close",
                              line=dict(width=1.5, color="#1f2937")), row=1, col=1)
+    # EMAs are drawn after (on top of) the candles and made thicker, so they
+    # stay readable against the packed 1-minute bars.
     if "EMA9" in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df["EMA9"], name="EMA 9",
-                                 line=dict(width=1.5, color="#f59e0b")), row=1, col=1)
+                                 line=dict(width=2.5, color="#f59e0b")), row=1, col=1)
     if "EMA21" in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df["EMA21"], name="EMA 21",
-                                 line=dict(width=1.5, color="#3b82f6")), row=1, col=1)
+                                 line=dict(width=2.5, color="#3b82f6")), row=1, col=1)
     if "VWAP" in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df["VWAP"], name="VWAP",
-                                 line=dict(width=1.5, color="#a855f7", dash="dash")),
+                                 line=dict(width=2, color="#a855f7", dash="dash")),
                       row=1, col=1)
 
     # Opening-range high/low (first 30 min of the session)
@@ -101,8 +110,9 @@ def radar_history_figure(history: list) -> go.Figure:
     if history:
         xs = [t for t, _ in history]
         ys = [s for _, s in history]
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name="Radar score",
-                                 line=dict(width=2, color="#0ea5e9")))
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines+markers", name="Radar score",
+                                 line=dict(width=2, color="#0ea5e9"),
+                                 marker=dict(size=6, color="#0ea5e9")))
     for y, label in ((45, "+45 strong"), (20, "+20 leaning"),
                      (-20, "−20 leaning"), (-45, "−45 strong")):
         fig.add_hline(y=y, line_dash="dot", line_color="#9ca3af",
