@@ -37,6 +37,15 @@ check("summary works", s["trend"] in ("Uptrend", "Downtrend", "Sideways"))
 df5 = data.demo_intraday("AAPL")
 check("demo intraday generated", len(df5) >= 200)
 
+# Multi-timeframe wiring: the engine reads 5-minute bars resampled from
+# the 1-minute feed (this is what detail_view passes to analyze_symbol).
+_r5 = data.resample_bars(df5, "5min")
+check("resample 1m -> 5m",
+      len(_r5) == len(df5) // 5
+      and _r5.index[0] == df5.index[0]
+      and abs(_r5["Close"].iloc[-1] - df5["Close"].iloc[-1]) < 1e-9
+      and abs(_r5["Volume"].sum() - df5["Volume"].sum()) < 1e-6)
+
 closes = df5["Close"].tolist()
 check("sma_last", abs(data.sma_last(closes, 20) - sum(closes[-20:]) / 20) < 1e-9)
 check("ema_last finite", math.isfinite(data.ema_last(closes, 20)))
@@ -201,8 +210,8 @@ check("caption names 15-minute bars, single session",
 cap1h = data.frame_caption(frame1h, "1 hour")
 check("caption names 1-hour bars", cap1h.startswith("Showing 1-hour bars ·"))
 capSess = data.frame_caption(frameSess, "Since market open")
-check("session caption = 5-minute bars, single day",
-      capSess.startswith("Showing 5-minute bars ·") and "→" not in capSess)
+check("session caption = 1-minute bars, single day",
+      capSess.startswith("Showing 1-minute bars ·") and "→" not in capSess)
 capEmpty = data.frame_caption(pd.DataFrame(), "5 minutes")
 check("empty frame caption", "no data" in capEmpty)
 fig_c = intraday_chart(frame5, "AAPL")
@@ -240,8 +249,9 @@ check("demo data already regular-hours",
       len(data.regular_session_only(df5)) == len(df5))
 check("empty frame passes through filter",
       data.regular_session_only(pd.DataFrame()).empty)
-# 1-minute demo bars (used by load_1m for the order-pressure check)
-_dm1 = data.demo_1m("AAPL")
+# 1-minute demo bars: demo_intraday IS the 1-minute feed now (the old
+# separate demo_1m is gone); the order-pressure check reads this feed.
+_dm1 = data.demo_intraday("AAPL")
 check("demo 1m generated",
       len(_dm1) >= 700
       and ((_dm1.index.hour * 60 + _dm1.index.minute) >= 570).all())
@@ -285,6 +295,10 @@ fig = intraday_chart(frame5, "AAPL", signals.demo_signal(df),
 check("intraday chart builds", hasattr(fig, "data") and len(fig.data) > 0)
 check("radar history chart builds",
       hasattr(radar_history_figure([(pd.Timestamp.now(), 10)]), "data"))
+_fig1 = radar_history_figure([(pd.Timestamp("2026-10-12 21:26:35"), 99)])
+check("single radar point renders as marker",
+      len(_fig1.data) == 1 and "markers" in _fig1.data[0].mode
+      and list(_fig1.data[0].y) == [99])
 check("forecast chart builds", hasattr(forecast_figure(fc), "data"))
 
 # ---------------------------------------------------------------------------
@@ -345,7 +359,7 @@ ve = data.tape_velocity(_dense)
 check("velocity normal pace", ve["state"] == "ok" and "normal pace" in ve["detail"])
 
 # Pressure integration: tape leans blend into the composite lean
-# (df1 = None: demo mode has no 1-minute bars, same as load_1m in app.py)
+# (df1 = None: the 1-minute feed is unavailable, e.g. fetch failed)
 df1 = None
 pr = data.compute_pressure(df5, df1, atr=1.0, trades=_bg + _burst)
 names = [c["name"] for c in pr["checks"]]
