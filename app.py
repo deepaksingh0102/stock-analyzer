@@ -104,7 +104,14 @@ def _style_movers(df: pd.DataFrame):
 
 
 def _bucket(live: bool, refresh_secs: int) -> int:
-    return int(time.time() // refresh_secs) if live else 0
+    # Time bucket (live tracking) + manual-refresh nonce. Bumping the nonce
+    # forces fresh fetches without clearing the whole cache or rerunning.
+    base = int(time.time() // refresh_secs) if live else 0
+    try:
+        nonce = st.session_state.get("refresh_nonce", 0)
+    except Exception:
+        nonce = 0
+    return base + nonce
 
 
 def fmt(x) -> str:
@@ -154,8 +161,11 @@ with st.sidebar:
                                    help="How often live tracking re-runs the analysis. "
                                         "Below 5s you hit Alpaca's 200-calls/min rate limit.")
     if st.button("🔄 Refresh now"):
-        st.cache_data.clear()
-        st.rerun()
+        # The click itself reruns the app; just bump the nonce so the
+        # loaders fetch fresh data. (Previously this cleared the whole
+        # cache and called st.rerun(), which could leave the page blank
+        # while fragments were active.)
+        st.session_state["refresh_nonce"] = st.session_state.get("refresh_nonce", 0) + 1
     use_demo = st.toggle("Demo data (offline / no internet)", value=False)
 
     if signals.alpaca_is_configured():
