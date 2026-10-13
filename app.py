@@ -178,6 +178,13 @@ with st.sidebar:
         # cache and called st.rerun(), which could leave the page blank
         # while fragments were active.)
         st.session_state["refresh_nonce"] = st.session_state.get("refresh_nonce", 0) + 1
+    chart_tf = st.selectbox("Chart timeframe",
+                            ["1 minute", "5 minutes", "15 minutes", "1 hour"],
+                            index=0,
+                            help="Candle size for the intraday chart. The chart always "
+                                 "shows today's session; this only changes how the candles "
+                                 "are grouped. The Direction Radar, signal, and forecast "
+                                 "always read 5-minute bars.")
     use_demo = st.toggle("Demo data (offline / no internet)", value=False)
 
     if signals.alpaca_is_configured():
@@ -196,12 +203,17 @@ def _thresholds():
             "min_adx": min_adx, "rs_tol": rs_tol}
 
 
+# Sidebar "Chart timeframe" labels -> intraday_frame window values.
+CHART_TF_WINDOW = {"1 minute": "session", "5 minutes": "5min",
+                   "15 minutes": "15min", "1 hour": "1h"}
+
+
 # ---------------------------------------------------------------------------
 # Tab 1: one symbol in detail
 # ---------------------------------------------------------------------------
 @st.fragment(run_every=refresh_secs if live else None)
 def detail_view(symbol: str, use_demo: bool,
-                live: bool, refresh_secs: int):
+                live: bool, refresh_secs: int, chart_tf: str = "1 minute"):
     if not symbol:
         st.info("Type a stock symbol in the sidebar to begin.")
         return
@@ -287,10 +299,12 @@ def detail_view(symbol: str, use_demo: bool,
             st.caption(f"Conviction: **{sc['conviction']}** "
                        f"({sc['supports']} support / {sc['contradicts']} contradict)")
 
-    # Intraday chart: 1-minute candles + EMA9/21 + VWAP + opening-range
-    # high/low (today's session). The chart frame is the raw 1-minute feed;
-    # the engine above reads the resampled 5-minute bars.
-    frame = data.intraday_frame(df_1m, "session")
+    # Intraday chart: candles at the sidebar timeframe + EMA9/21 + VWAP +
+    # opening-range high/low (today's session). The chart frame is the
+    # 1-minute feed, resampled to the chosen candle size; the engine above
+    # reads the resampled 5-minute bars.
+    window = CHART_TF_WINDOW.get(chart_tf, "session")
+    frame = data.intraday_frame(df_1m, window)
     or_ = data.opening_range(df_1m)
     if frame.empty:
         st.info("Not enough intraday data to draw the chart.")
@@ -299,10 +313,10 @@ def detail_view(symbol: str, use_demo: bool,
             frame, symbol, sig,
             or_high=or_["high"] if or_ else None,
             or_low=or_["low"] if or_ else None,
-            window_label="Since market open"),
+            window_label=chart_tf),
             use_container_width=True,
-            key=f"intraday_{symbol}_session")
-        st.caption(data.frame_caption(frame, "Since market open"))
+            key=f"intraday_{symbol}_{window}")
+        st.caption(data.frame_caption(frame, chart_tf))
         # Plain-English takeaway for novices
         last = frame.iloc[-1]
         px = live_px if live_px else res["entry"]
@@ -310,14 +324,15 @@ def detail_view(symbol: str, use_demo: bool,
             px, last["EMA9"], last["EMA21"], last["VWAP"], last["RSI"],
             or_["high"] if or_ else None, or_["low"] if or_ else None))
         with st.expander("How to read this chart"):
+            bar_word = data.TIMEFRAME_BAR_WORD.get(chart_tf, chart_tf)
             st.write(
-                "- **Candles** — each one is a 1-minute "
-                "slice of time, so a new candle prints every minute. "
-                "Green = price went up in that minute, red = it went down.\n"
-                "- **Two timeframes** — the chart is the fast 1-minute view. The "
+                f"- **Candles** — each one is a {bar_word} "
+                "slice of time. "
+                "Green = price went up in that slice, red = it went down.\n"
+                f"- **Two timeframes** — the chart shows {chart_tf} candles. The "
                 "Direction Radar, signal, and forecast below read 5-minute bars "
                 "(resampled from the same feed), so they confirm the slower trend "
-                "while the chart shows the fast action.\n"
+                "while the chart shows the selected candle size.\n"
                 "- **Orange & blue lines (EMA 9 / EMA 21)** — the average price over the last "
                 "9 / 21 slices. Price above both = uptrend; below both = downtrend.\n"
                 "- **Dark line (Close)** — the closing price at each point in time. Above "
@@ -661,7 +676,7 @@ def watchlist_view(watchlist_text: str, use_demo: bool,
 
 
 with tab_detail:
-    detail_view(symbol, use_demo, live, refresh_secs)
+    detail_view(symbol, use_demo, live, refresh_secs, chart_tf)
 with tab_movers:
     movers_view(use_demo, live, refresh_secs)
 with tab_watch:
