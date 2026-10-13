@@ -98,9 +98,15 @@ def fetch_alpaca_bars(symbol: str, timeframe: str = "5Min",
     feed = feed or _alpaca_feed()
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
+    # sort=desc: Alpaca pages FORWARD from `start`, so with the default
+    # ascending order a `limit` smaller than the window returns the OLDEST
+    # bars (the chart showed yesterday's session when limit=500 cut a
+    # ~1,170-bar 1-min window). Newest-first guarantees the returned page
+    # holds the bars the chart actually needs. The DataFrame is re-sorted
+    # ascending below, so callers see chronological order either way.
     params = {"timeframe": timeframe, "start": start.isoformat(),
               "end": end.isoformat(), "limit": limit, "feed": feed,
-              "adjustment": "raw"}
+              "adjustment": "raw", "sort": "desc"}
     r = requests.get("https://data.alpaca.markets/v2/stocks/" + symbol + "/bars",
                      headers=_alpaca_headers(), params=params, timeout=10)
     if not r.ok:
@@ -211,14 +217,18 @@ def fetch_intraday(symbol: str, period: str = INTRADAY_PERIOD) -> pd.DataFrame:
     """1-minute bars, regular session only (9:30–16:00 ET).
 
     Alpaca when keys are set, else Yahoo. The chart plots these directly;
-    the engine resamples them to 5-minute bars. limit=500 (≈1.3 sessions)
-    is plenty of warm-up for the indicators, and keeps the payload small.
+    the engine resamples them to 5-minute bars.
+
+    limit MUST exceed the window's bar count (3 days × 390 = ~1,170):
+    Alpaca pages forward from `start`, so a smaller limit returns the
+    OLDEST bars and the chart shows a stale session (this happened with
+    limit=500). 10000 is Alpaca's max; the actual payload is ~1,170 bars.
 
     (No separate 1-minute fetch: this feed IS the 1-minute feed, so the
     order-pressure check reads it directly instead of fetching it twice.)
     """
     if alpaca_is_configured():
-        df = fetch_alpaca_bars(symbol, timeframe="1Min", days=3, limit=500)
+        df = fetch_alpaca_bars(symbol, timeframe="1Min", days=3, limit=10000)
     else:
         import yfinance as yf
 
