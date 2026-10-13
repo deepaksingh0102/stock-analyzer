@@ -179,8 +179,9 @@ with st.sidebar:
         # while fragments were active.)
         st.session_state["refresh_nonce"] = st.session_state.get("refresh_nonce", 0) + 1
     chart_tf = st.selectbox("Chart timeframe",
-                            ["5 minutes", "15 minutes", "1 hour", "Since market open"],
-                            index=3,
+                            ["5 minutes", "15 minutes", "1 hour", "2 hours",
+                             "3 hours", "4 hours", "Since market open"],
+                            index=6,
                             help="How much recent history the chart shows. Candles are "
                                  "always 1-minute. The Direction Radar, signal, and forecast "
                                  "always read 5-minute bars.")
@@ -206,6 +207,7 @@ def _thresholds():
 # (None = full session since market open). Candles are always 1-minute;
 # the selector controls the window, not the candle size.
 CHART_TF_TRAILING = {"5 minutes": 5, "15 minutes": 15, "1 hour": 60,
+                     "2 hours": 120, "3 hours": 180, "4 hours": 240,
                      "Since market open": None}
 
 
