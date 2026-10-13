@@ -26,12 +26,14 @@ import pandas as pd
 # How far back to download. We always pull 2 years so the indicators
 # (e.g. 50-day average) are valid, then show only the window you pick.
 HISTORY_PERIOD = "2y"
-# Intraday pull for the 5-minute engine (covers ~5 trading days).
+# Intraday pull: 1-minute bars. The chart plots them directly; the engine
+# resamples them to 5-minute bars (see detail_view), so its tuned logic is
+# unchanged.
 INTRADAY_PERIOD = "5d"
 
 WINDOWS = {"1 month": 21, "3 months": 63, "6 months": 126, "1 year": 252, "2 years": 504}
 
-# (The intraday chart always shows today's session as 5-minute bars.)
+# (The intraday chart always shows today's session as 1-minute bars.)
 
 NAN = float("nan")
 
@@ -206,39 +208,24 @@ def fetch_prices(symbol: str) -> pd.DataFrame:
 
 
 def fetch_intraday(symbol: str, period: str = INTRADAY_PERIOD) -> pd.DataFrame:
-    """5-minute bars, regular session only (9:30–16:00 ET).
+    """1-minute bars, regular session only (9:30–16:00 ET).
 
-    Alpaca when keys are set, else Yahoo.
+    Alpaca when keys are set, else Yahoo. The chart plots these directly;
+    the engine resamples them to 5-minute bars. limit=500 (≈1.3 sessions)
+    is plenty of warm-up for the indicators, and keeps the payload small.
+
+    (No separate 1-minute fetch: this feed IS the 1-minute feed, so the
+    order-pressure check reads it directly instead of fetching it twice.)
     """
     if alpaca_is_configured():
-        df = fetch_alpaca_bars(symbol, timeframe="5Min", days=7, limit=1000)
+        df = fetch_alpaca_bars(symbol, timeframe="1Min", days=3, limit=500)
     else:
         import yfinance as yf
 
-        df = yf.Ticker(symbol).history(period=period, interval="5m", auto_adjust=True,
+        df = yf.Ticker(symbol).history(period=period, interval="1m", auto_adjust=True,
                                        prepost=False)
         if df is None or df.empty:
             raise ValueError(f"No intraday data found for '{symbol}'.")
-        df = _clean_ohlc(df)
-    return regular_session_only(df)
-
-
-def fetch_1m(symbol: str) -> pd.DataFrame:
-    """1-minute bars (last ~2 days, regular session) for the fast-momentum check.
-
-    limit=120: compute_pressure only needs ~20 bars (EMA5 slope + ATR14),
-    and the most recent 120 bars still cover early-morning sessions via the
-    prior day. The old limit=1000 made this the heaviest call per refresh.
-    """
-    if alpaca_is_configured():
-        df = fetch_alpaca_bars(symbol, timeframe="1Min", days=3, limit=120)
-    else:
-        import yfinance as yf
-
-        df = yf.Ticker(symbol).history(period="2d", interval="1m", auto_adjust=True,
-                                       prepost=False)
-        if df is None or df.empty:
-            return df
         df = _clean_ohlc(df)
     return regular_session_only(df)
 
@@ -286,30 +273,13 @@ def demo_prices(symbol: str, days: int = 504) -> pd.DataFrame:
     )
 
 
-def demo_intraday(symbol: str, days: int = 3, bars_per_day: int = 78) -> pd.DataFrame:
-    """Fake 5-minute bars (regular-session hours) for offline testing."""
-    rng = np.random.default_rng(zlib.crc32((symbol + ":5m").encode()))
-    dates = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=days)
-    frames = []
-    price = 100.0
-    for day in dates:
-        idx = pd.date_range(day + pd.Timedelta(hours=9, minutes=30),
-                            periods=bars_per_day, freq="5min")
-        rets = rng.normal(0.0002, 0.004, bars_per_day)
-        closes = price * np.exp(np.cumsum(rets))
-        opens = np.r_[closes[0] / (1 + rets[0]), closes[:-1]]
-        highs = np.maximum(opens, closes) * (1 + np.abs(rng.normal(0, 0.002, bars_per_day)))
-        lows = np.minimum(opens, closes) * (1 - np.abs(rng.normal(0, 0.002, bars_per_day)))
-        vols = rng.integers(10_000, 200_000, bars_per_day)
-        frames.append(pd.DataFrame(
-            {"Open": opens, "High": highs, "Low": lows, "Close": closes, "Volume": vols},
-            index=idx))
-        price = closes[-1]
-    return pd.concat(frames)
+def demo_intraday(symbol: str, days: int = 3, bars_per_day: int = 390) -> pd.DataFrame:
+    """Fake 1-minute bars (regular-session hours) for offline testing.
 
-
-def demo_1m(symbol: str, days: int = 2, bars_per_day: int = 390) -> pd.DataFrame:
-    """Fake 1-minute bars (regular-session hours) for offline testing."""
+    This is the demo version of the intraday feed: the chart plots it
+    directly, and the engine resamples it to 5-minute bars. (The old
+    separate demo_1m is gone — this feed IS the 1-minute feed now.)
+    """
     rng = np.random.default_rng(zlib.crc32((symbol + ":1m").encode()))
     dates = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=days)
     frames = []
@@ -370,7 +340,7 @@ def regular_session_only(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def resample_bars(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """Resample 5-minute OHLCV bars to a coarser rule ('15min', '1h', ...)."""
+    """Resample OHLCV bars to a coarser rule ('5min', '15min', '1h', ...)."""
     if df is None or df.empty:
         return df
     agg = {"Open": "first", "High": "max", "Low": "min",
@@ -396,14 +366,14 @@ def vwap_series(df: pd.DataFrame) -> pd.Series:
 def opening_range(df_5m: pd.DataFrame, minutes: int = 30) -> dict | None:
     """Opening-range high/low from the first `minutes` of today's session.
 
-    Computed from the raw 5-minute bars (first 6 bars = 30 min) so it stays
-    consistent no matter which chart timeframe is displayed.
+    Time-based (not bar-count-based), so it works for any bar size:
+    1-minute bars → first 30 bars; 5-minute bars → first 6 bars.
     """
     sess = session_bars(df_5m)
     if sess is None or sess.empty:
         return None
-    n_bars = max(1, minutes // 5)
-    orb = sess.iloc[:n_bars]
+    start = sess.index[0]
+    orb = sess[sess.index < start + pd.Timedelta(minutes=minutes)]
     if orb.empty:
         return None
     return {"high": float(orb["High"].max()), "low": float(orb["Low"].min()),
@@ -424,8 +394,8 @@ def intraday_frame(df_5m: pd.DataFrame, window: str) -> pd.DataFrame:
         df = resample_bars(df_5m, "1h").copy()
     elif window == "15min":
         df = resample_bars(df_5m, "15min").copy()
-    else:  # "5min" or "session": full 5-minute history; sliced to the
-        # latest session below after indicators are warmed up.
+    else:  # "session": full history as-is; sliced to the latest session
+        # below after indicators are warmed up.
         df = df_5m.copy()
     if df.empty:
         return df
@@ -444,18 +414,20 @@ def intraday_frame(df_5m: pd.DataFrame, window: str) -> pd.DataFrame:
 
 
 # Human-readable bar size per chart timeframe (for captions / explainer text).
+# The chart always shows 1-minute bars now; the other entries are kept for
+# the resampled views (15-min / 1-hour) and the caption tests.
 TIMEFRAME_BAR_WORD = {
     "5 minutes": "5-minute",
     "15 minutes": "15-minute",
     "1 hour": "1-hour",
-    "Since market open": "5-minute",
+    "Since market open": "1-minute",
 }
 
 
 def frame_caption(df: pd.DataFrame, tf_name: str) -> str:
     """One-line description of what the intraday chart is displaying.
 
-    e.g. 'Showing 15-minute bars · 78 bars · Oct 8 → Oct 12'.
+    e.g. 'Showing 1-minute bars · 390 bars · Oct 13'.
     Shown under the chart so the chosen timeframe's effect is explicit.
     """
     bar_word = TIMEFRAME_BAR_WORD.get(tf_name, tf_name)
