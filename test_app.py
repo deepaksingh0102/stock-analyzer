@@ -212,6 +212,15 @@ check("caption names 1-hour bars", cap1h.startswith("Showing 1-hour bars ·"))
 capSess = data.frame_caption(frameSess, "Since market open")
 check("session caption = 1-minute bars, single day",
       capSess.startswith("Showing 1-minute bars ·") and "→" not in capSess)
+# Sidebar timeframe: the chart resamples the 1-minute feed to the chosen
+# candle size (5-min / 15-min / 1-hour), and captions label it.
+frame5m = data.intraday_frame(df5, "5min")
+check("chart timeframe 5min resamples 1m feed",
+      len(frame5m) == len(frameSess) // 5
+      and (frame5m.index[1] - frame5m.index[0]) == pd.Timedelta(minutes=5))
+cap1m = data.frame_caption(frameSess, "1 minute")
+check("caption names 1-minute bars",
+      cap1m.startswith("Showing 1-minute bars ·"))
 capEmpty = data.frame_caption(pd.DataFrame(), "5 minutes")
 check("empty frame caption", "no data" in capEmpty)
 fig_c = intraday_chart(frame5, "AAPL")
