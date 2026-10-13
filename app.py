@@ -38,18 +38,18 @@ st.set_page_config(page_title="Stock Analyzer", page_icon="📈", layout="wide",
 # fresh cache entry, so auto-refresh always fetches new data. When live
 # tracking is off, bucket=0 and the cache behaves normally.
 # ---------------------------------------------------------------------------
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
 def load_daily(symbol: str, use_demo: bool, bucket: int = 0) -> pd.DataFrame:
     raw = data.demo_prices(symbol) if use_demo else data.fetch_prices(symbol)
     return data.add_indicators(raw)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
 def load_intraday(symbol: str, use_demo: bool, bucket: int = 0) -> pd.DataFrame:
     return data.demo_intraday(symbol) if use_demo else data.fetch_intraday(symbol)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
 def load_1m(symbol: str, use_demo: bool, bucket: int = 0):
     if use_demo:
         return data.demo_1m(symbol)
@@ -59,14 +59,14 @@ def load_1m(symbol: str, use_demo: bool, bucket: int = 0):
         return None
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
 def load_quote(symbol: str, use_demo: bool, bucket: int = 0):
     if use_demo:
         return None, ""
     return data.fetch_quote(symbol)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
 def load_trades(symbol: str, use_demo: bool, bucket: int = 0):
     """Recent trade prints for absorption/velocity. None = not attempted
     (no Alpaca keys); [] = attempted but nothing returned."""
@@ -78,7 +78,7 @@ def load_trades(symbol: str, use_demo: bool, bucket: int = 0):
         return []
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
 def load_sp500_movers(use_demo: bool, bucket: int = 0):
     """Top 10 S&P 500 gainers/losers. {"error": msg} on failure."""
     if use_demo:
@@ -156,10 +156,11 @@ with st.sidebar:
     st.header("Settings")
     live = st.toggle("Live tracking (auto-refresh)", value=False,
                      help="When on, the analysis re-runs automatically at the interval below.")
-    refresh_secs = st.number_input("Refresh every (seconds)", min_value=5, max_value=3600,
-                                   value=max(config.AUTO_REFRESH_SECONDS, 5), step=5,
+    refresh_secs = st.number_input("Refresh every (seconds)", min_value=30, max_value=3600,
+                                   value=max(config.AUTO_REFRESH_SECONDS, 30), step=5,
                                    help="How often live tracking re-runs the analysis. "
-                                        "Below 5s you hit Alpaca's 200-calls/min rate limit.")
+                                        "Below 30s the server runs out of threads/memory "
+                                        "(5s refresh caused a 'can't start new thread' crash).")
     if st.button("🔄 Refresh now"):
         # The click itself reruns the app; just bump the nonce so the
         # loaders fetch fresh data. (Previously this cleared the whole
