@@ -220,6 +220,8 @@ check("trailing 15m window shows last 15 bars",
       and (_trail.index[-1] - _trail.index[0]) == pd.Timedelta(minutes=14))
 _trail60 = data.intraday_frame(df5, "session", trailing_minutes=60)
 check("trailing 1h window shows last 60 bars", len(_trail60) == 60)
+_trail240 = data.intraday_frame(df5, "session", trailing_minutes=240)
+check("trailing 4h window shows last 240 bars", len(_trail240) == 240)
 # intraday_frame still supports resampling to coarser candles (used by tests).
 frame5m = data.intraday_frame(df5, "5min")
 check("chart timeframe 5min resamples 1m feed",
