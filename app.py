@@ -61,17 +61,10 @@ def load_daily(symbol: str, use_demo: bool, bucket: int = 0) -> pd.DataFrame:
 
 @st.cache_data(ttl=600, max_entries=32, show_spinner=False)
 def load_intraday(symbol: str, use_demo: bool, bucket: int = 0) -> pd.DataFrame:
+    """Raw 1-minute intraday feed. The chart plots it directly; the engine
+    resamples it to 5-minute bars (see detail_view). No separate 1-minute
+    loader — this feed IS the 1-minute feed."""
     return data.demo_intraday(symbol) if use_demo else data.fetch_intraday(symbol)
-
-
-@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
-def load_1m(symbol: str, use_demo: bool, bucket: int = 0):
-    if use_demo:
-        return data.demo_1m(symbol)
-    try:
-        return data.fetch_1m(symbol)
-    except Exception:
-        return None
 
 
 @st.cache_data(ttl=600, max_entries=32, show_spinner=False)
@@ -214,7 +207,8 @@ def detail_view(symbol: str, use_demo: bool,
         return
     if live:
         st.caption(f"🟢 Live tracking on — refreshing every {refresh_secs}s · "
-                   f"last updated {_now_et().strftime('%H:%M:%S')} ET")
+                   f"last updated {_now_et().strftime('%H:%M:%S')} ET · "
+                   "auto-refresh pauses while this tab is in the background")
     # Tiered freshness: not all data needs the same refresh rate. The quote
     # and trade tape are tiny and live-feeling (30s); 5-min/1-min bars only
     # move every 1-5 min (60s); daily bars barely change intraday (5 min).
@@ -226,10 +220,16 @@ def detail_view(symbol: str, use_demo: bool,
     try:
         with st.spinner(f"Loading {symbol}…"):
             df_daily = load_daily(symbol, use_demo, bucket_slow)
-            df_5m = load_intraday(symbol, use_demo, bucket_mid)
-            df_1m = load_1m(symbol, use_demo, bucket_mid)
-            bench_5m = load_intraday(bench, use_demo, bucket_mid) if bench != symbol else None
-            bench2_5m = load_intraday(bench2, use_demo, bucket_mid) if bench2 else None
+            # Multi-timeframe: the raw feed is 1-minute bars (chart plots
+            # them directly, new candle every minute). The engine reads
+            # 5-minute bars resampled from the same feed, so its tuned
+            # thresholds, radar, and signals behave exactly as before.
+            df_1m = load_intraday(symbol, use_demo, bucket_mid)
+            df_5m = data.resample_bars(df_1m, "5min")
+            bench_5m = (data.resample_bars(load_intraday(bench, use_demo, bucket_mid), "5min")
+                        if bench != symbol else None)
+            bench2_5m = (data.resample_bars(load_intraday(bench2, use_demo, bucket_mid), "5min")
+                         if bench2 else None)
             quote, quote_note = load_quote(symbol, use_demo, bucket)
             trades = load_trades(symbol, use_demo, bucket)
     except Exception as exc:
@@ -287,9 +287,11 @@ def detail_view(symbol: str, use_demo: bool,
             st.caption(f"Conviction: **{sc['conviction']}** "
                        f"({sc['supports']} support / {sc['contradicts']} contradict)")
 
-    # Intraday chart: EMA9/21 + VWAP + opening-range high/low (today's session).
-    frame = data.intraday_frame(df_5m, "session")
-    or_ = data.opening_range(df_5m)
+    # Intraday chart: 1-minute candles + EMA9/21 + VWAP + opening-range
+    # high/low (today's session). The chart frame is the raw 1-minute feed;
+    # the engine above reads the resampled 5-minute bars.
+    frame = data.intraday_frame(df_1m, "session")
+    or_ = data.opening_range(df_1m)
     if frame.empty:
         st.info("Not enough intraday data to draw the chart.")
     else:
@@ -309,9 +311,13 @@ def detail_view(symbol: str, use_demo: bool,
             or_["high"] if or_ else None, or_["low"] if or_ else None))
         with st.expander("How to read this chart"):
             st.write(
-                "- **Candles** — each one is a 5-minute "
-                "slice of time. "
-                "Green = price went up in that slice, red = it went down.\n"
+                "- **Candles** — each one is a 1-minute "
+                "slice of time, so a new candle prints every minute. "
+                "Green = price went up in that minute, red = it went down.\n"
+                "- **Two timeframes** — the chart is the fast 1-minute view. The "
+                "Direction Radar, signal, and forecast below read 5-minute bars "
+                "(resampled from the same feed), so they confirm the slower trend "
+                "while the chart shows the fast action.\n"
                 "- **Orange & blue lines (EMA 9 / EMA 21)** — the average price over the last "
                 "9 / 21 slices. Price above both = uptrend; below both = downtrend.\n"
                 "- **Dark line (Close)** — the closing price at each point in time. Above "
