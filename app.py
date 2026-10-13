@@ -118,10 +118,13 @@ def _style_movers(df: pd.DataFrame):
         return sty
 
 
-def _bucket(live: bool, refresh_secs: int) -> int:
+def _bucket(live: bool, refresh_secs: int, bucket_secs: int | None = None) -> int:
     # Time bucket (live tracking) + manual-refresh nonce. Bumping the nonce
     # forces fresh fetches without clearing the whole cache or rerunning.
-    base = int(time.time() // refresh_secs) if live else 0
+    # bucket_secs lets slow-moving data refresh less often than the live
+    # tick: daily bars and movers don't need a 30s refresh, so they get
+    # their own slower bucket instead of re-fetching every cycle.
+    base = int(time.time() // (bucket_secs or refresh_secs)) if live else 0
     try:
         nonce = st.session_state.get("refresh_nonce", 0)
     except Exception:
@@ -212,14 +215,21 @@ def detail_view(symbol: str, use_demo: bool,
     if live:
         st.caption(f"🟢 Live tracking on — refreshing every {refresh_secs}s · "
                    f"last updated {_now_et().strftime('%H:%M:%S')} ET")
+    # Tiered freshness: not all data needs the same refresh rate. The quote
+    # and trade tape are tiny and live-feeling (30s); 5-min/1-min bars only
+    # move every 1-5 min (60s); daily bars barely change intraday (5 min).
+    # This cuts most of the per-refresh fetching without losing freshness
+    # where it matters.
     bucket = _bucket(live, refresh_secs)
+    bucket_mid = _bucket(live, refresh_secs, bucket_secs=60)
+    bucket_slow = _bucket(live, refresh_secs, bucket_secs=300)
     try:
         with st.spinner(f"Loading {symbol}…"):
-            df_daily = load_daily(symbol, use_demo, bucket)
-            df_5m = load_intraday(symbol, use_demo, bucket)
-            df_1m = load_1m(symbol, use_demo, bucket)
-            bench_5m = load_intraday(bench, use_demo, bucket) if bench != symbol else None
-            bench2_5m = load_intraday(bench2, use_demo, bucket) if bench2 else None
+            df_daily = load_daily(symbol, use_demo, bucket_slow)
+            df_5m = load_intraday(symbol, use_demo, bucket_mid)
+            df_1m = load_1m(symbol, use_demo, bucket_mid)
+            bench_5m = load_intraday(bench, use_demo, bucket_mid) if bench != symbol else None
+            bench2_5m = load_intraday(bench2, use_demo, bucket_mid) if bench2 else None
             quote, quote_note = load_quote(symbol, use_demo, bucket)
             trades = load_trades(symbol, use_demo, bucket)
     except Exception as exc:
@@ -600,7 +610,8 @@ def detail_view(symbol: str, use_demo: bool,
 # ---------------------------------------------------------------------------
 def movers_view(use_demo: bool, live: bool, refresh_secs: int):
     st.subheader("S&P 500 — Top Movers of the Day")
-    bucket = _bucket(live, refresh_secs)
+    # Daily closes: 5-min refresh is plenty.
+    bucket = _bucket(live, refresh_secs, bucket_secs=300)
     with st.spinner("Loading S&P 500 movers…"):
         m = load_sp500_movers(use_demo, bucket)
     if m.get("error"):
@@ -622,7 +633,8 @@ def watchlist_view(watchlist_text: str, use_demo: bool,
     if not symbols:
         st.info("Add symbols to the watchlist in the sidebar.")
         return
-    bucket = _bucket(live, refresh_secs)
+    # Daily bars only: 5-min refresh is plenty.
+    bucket = _bucket(live, refresh_secs, bucket_secs=300)
 
     rows = []
     for sym in symbols:
