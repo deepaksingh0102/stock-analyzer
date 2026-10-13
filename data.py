@@ -390,13 +390,16 @@ def opening_range(df_5m: pd.DataFrame, minutes: int = 30) -> dict | None:
             "minutes": minutes}
 
 
-def intraday_frame(df_5m: pd.DataFrame, window: str) -> pd.DataFrame:
+def intraday_frame(df_5m: pd.DataFrame, window: str,
+                   trailing_minutes: int | None = None) -> pd.DataFrame:
     """Display frame for the intraday chart: resampled bars + EMA9/21 + VWAP.
 
-    The timeframe only changes the candle size — the chart always shows the
-    most recent session. Indicators are computed on the full multi-day
-    history first (warm-up), then the frame is sliced to the latest session
-    for display, so EMA/RSI/MACD stay meaningful on thin views like hourly.
+    Indicators are computed on the full multi-day history first (warm-up),
+    then the frame is sliced to the latest session for display, so
+    EMA/RSI/MACD stay meaningful on thin views like hourly. If
+    `trailing_minutes` is set, the display is further cut to the most
+    recent N minutes (the sidebar's trailing window) — the indicators
+    still carry the full-history warm-up.
     """
     if df_5m is None or df_5m.empty:
         return pd.DataFrame()
@@ -422,7 +425,12 @@ def intraday_frame(df_5m: pd.DataFrame, window: str) -> pd.DataFrame:
     # Display only the most recent session; the indicators above already
     # carry the multi-day warm-up.
     last_date = df.index[-1].date()
-    return df[[d.date() == last_date for d in df.index]]
+    df = df[[d.date() == last_date for d in df.index]]
+    # Trailing window: keep only the most recent N minutes.
+    if trailing_minutes is not None and not df.empty:
+        cutoff = df.index[-1] - pd.Timedelta(minutes=trailing_minutes)
+        df = df[df.index > cutoff]
+    return df
 
 
 # Human-readable bar size per chart timeframe (for captions / explainer text).
