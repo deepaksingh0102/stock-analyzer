@@ -163,8 +163,10 @@ def _daily_closes_many(tickers: list) -> tuple:
         except Exception:
             pass  # fall through to Yahoo
     import yfinance as yf
+    # threads=False: yfinance's thread pool can itself fail with
+    # "can't start new thread" when the server is under memory pressure.
     px = yf.download(tickers, period="5d", interval="1d", auto_adjust=True,
-                     progress=False, threads=True)
+                     progress=False, threads=False)
     closes = px["Close"] if isinstance(px.columns, pd.MultiIndex) else px[["Close"]]
     return closes, "Yahoo Finance"
 
