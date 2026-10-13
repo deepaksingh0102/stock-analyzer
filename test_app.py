@@ -212,8 +212,15 @@ check("caption names 1-hour bars", cap1h.startswith("Showing 1-hour bars ·"))
 capSess = data.frame_caption(frameSess, "Since market open")
 check("session caption = 1-minute bars, single day",
       capSess.startswith("Showing 1-minute bars ·") and "→" not in capSess)
-# Sidebar timeframe: the chart resamples the 1-minute feed to the chosen
-# candle size (5-min / 15-min / 1-hour), and captions label it.
+# Sidebar timeframe: the chart shows a trailing window of the 1-minute
+# feed (indicators keep their full-history warm-up; only the display is cut).
+_trail = data.intraday_frame(df5, "session", trailing_minutes=15)
+check("trailing 15m window shows last 15 bars",
+      len(_trail) == 15
+      and (_trail.index[-1] - _trail.index[0]) == pd.Timedelta(minutes=14))
+_trail60 = data.intraday_frame(df5, "session", trailing_minutes=60)
+check("trailing 1h window shows last 60 bars", len(_trail60) == 60)
+# intraday_frame still supports resampling to coarser candles (used by tests).
 frame5m = data.intraday_frame(df5, "5min")
 check("chart timeframe 5min resamples 1m feed",
       len(frame5m) == len(frameSess) // 5
