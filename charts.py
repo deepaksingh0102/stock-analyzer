@@ -61,10 +61,15 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
 
     # Standard pivot lines from the prior day (P, R1, S1) — slate dotted,
     # kept subtle so they read as reference levels, not signals.
-    if pivots:
+    # Only levels within 2.5% of the last close are drawn: a pivot far
+    # from price (e.g. R1 5% above) would stretch the y-axis and squash
+    # the candles, and a level nobody's near isn't a useful reference.
+    if pivots and not df.empty:
+        ref = float(df["Close"].iloc[-1])
         for key, label in (("R1", "R1"), ("P", "Pivot"), ("S1", "S1")):
             v = pivots.get(key)
-            if v is not None and math.isfinite(v):
+            if (v is not None and math.isfinite(v) and ref > 0
+                    and abs(v - ref) / ref <= 0.025):
                 fig.add_hline(y=v, line_dash="dot", line_color="#64748b",
                               line_width=1.5, row=1, col=1,
                               annotation_text=f"{label} {v:,.2f}",
