@@ -7,9 +7,10 @@ from signals import Signal
 
 def intraday_chart(df, symbol: str, signal: Signal | None = None,
                    or_high: float | None = None, or_low: float | None = None,
-                   window_label: str = "") -> go.Figure:
-    """Intraday candles + close line, EMA9/21, VWAP, opening-range lines,
-    volume, MACD, RSI."""
+                   window_label: str = "",
+                   pivots: dict | None = None) -> go.Figure:
+    """Intraday candles + close line, EMA9/15/21, VWAP, opening-range lines,
+    standard pivot lines (P/R1/S1 from the prior day), volume, MACD, RSI."""
     import math
     title = f"{symbol} — {window_label}" if window_label else f"{symbol} intraday"
     fig = make_subplots(
@@ -57,6 +58,17 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
         fig.add_hline(y=or_low, line_dash="dash", line_color="#dc2626", row=1, col=1,
                       annotation_text=f"OR low {or_low:,.2f}",
                       annotation_position="bottom left")
+
+    # Standard pivot lines from the prior day (P, R1, S1) — slate dotted,
+    # kept subtle so they read as reference levels, not signals.
+    if pivots:
+        for key, label in (("R1", "R1"), ("P", "Pivot"), ("S1", "S1")):
+            v = pivots.get(key)
+            if v is not None and math.isfinite(v):
+                fig.add_hline(y=v, line_dash="dot", line_color="#64748b",
+                              line_width=1.5, row=1, col=1,
+                              annotation_text=f"{label} {v:,.2f}",
+                              annotation_position="bottom right")
 
     # Entry / exit levels from the signal
     if signal and signal.action in ("BUY", "SELL"):
