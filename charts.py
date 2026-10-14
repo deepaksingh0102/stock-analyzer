@@ -37,6 +37,9 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
     if "EMA9" in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df["EMA9"], name="EMA 9",
                                  line=dict(width=2.5, color="#f59e0b")), row=1, col=1)
+    if "EMA15" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["EMA15"], name="EMA 15",
+                                 line=dict(width=2.5, color="#14b8a6")), row=1, col=1)
     if "EMA21" in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df["EMA21"], name="EMA 21",
                                  line=dict(width=2.5, color="#3b82f6")), row=1, col=1)
