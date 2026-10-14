@@ -416,6 +416,7 @@ def intraday_frame(df_5m: pd.DataFrame, window: str,
         return df
     closes = df["Close"].astype(float).tolist()
     df["EMA9"] = ema_series(closes, 9)
+    df["EMA15"] = ema_series(closes, 15)
     df["EMA21"] = ema_series(closes, 21)
     df["VWAP"] = vwap_series(df).values
     df["RSI"] = rsi_series(closes, 14)
