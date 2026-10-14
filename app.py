@@ -308,6 +308,7 @@ def detail_view(symbol: str, use_demo: bool,
     trailing = CHART_TF_TRAILING.get(chart_tf)
     frame = data.intraday_frame(df_1m, "session", trailing_minutes=trailing)
     or_ = data.opening_range(df_1m)
+    pivots = data.prior_day_pivots(df_daily)
     if frame.empty:
         st.info("Not enough intraday data to draw the chart.")
     else:
@@ -316,7 +317,8 @@ def detail_view(symbol: str, use_demo: bool,
             or_high=or_["high"] if or_ else None,
             or_low=or_["low"] if or_ else None,
             window_label=(f"Last {chart_tf}" if trailing is not None
-                          else "Since market open")),
+                          else "Since market open"),
+            pivots=pivots),
             use_container_width=True,
             key=f"intraday_{symbol}_{chart_tf.replace(' ', '_')}")
         st.caption(data.frame_caption(frame, "1 minute"))
