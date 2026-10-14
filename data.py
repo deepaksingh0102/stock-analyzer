@@ -19,6 +19,8 @@ Conventions
 """
 import math
 import zlib
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -388,6 +390,27 @@ def opening_range(df_5m: pd.DataFrame, minutes: int = 30) -> dict | None:
         return None
     return {"high": float(orb["High"].max()), "low": float(orb["Low"].min()),
             "minutes": minutes}
+
+
+def prior_day_pivots(df_daily: pd.DataFrame) -> dict | None:
+    """Standard floor pivots from the prior COMPLETED daily bar.
+
+    P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H. Skips today's still-forming bar,
+    so the levels are fixed before the open (no intraday lookahead).
+    """
+    if df_daily is None or df_daily.empty:
+        return None
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    dates = df_daily.index.date
+    prior = df_daily[dates < today]
+    bar = prior.iloc[-1] if not prior.empty else None
+    if bar is None:
+        return None
+    h, l, c = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
+    if not all(math.isfinite(x) for x in (h, l, c)) or h <= 0 or l <= 0:
+        return None
+    p = (h + l + c) / 3.0
+    return {"P": p, "R1": 2 * p - l, "S1": 2 * p - h}
 
 
 def intraday_frame(df_5m: pd.DataFrame, window: str,
