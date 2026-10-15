@@ -194,8 +194,16 @@ def fetch_alpaca_quote(symbol: str, feed: str | None = None) -> dict | None:
     q = r.json().get("quote") or {}
     if not q.get("bp") or not q.get("ap"):
         return None
-    return {"bid": float(q["bp"]), "ask": float(q["ap"]),
-            "bidSize": q.get("bs"), "askSize": q.get("as")}
+    out = {"bid": float(q["bp"]), "ask": float(q["ap"]),
+           "bidSize": q.get("bs"), "askSize": q.get("as")}
+    # Quote timestamp — the app checks it for staleness so a delayed feed
+    # is never presented as "live".
+    try:
+        out["t"] = pd.Timestamp(q["t"]).tz_convert(
+            "America/New_York").tz_localize(None).to_pydatetime()
+    except Exception:
+        pass
+    return out
 
 
 def fetch_prices(symbol: str) -> pd.DataFrame:
