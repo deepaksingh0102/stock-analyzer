@@ -299,21 +299,32 @@ def detail_view(symbol: str, use_demo: bool,
     # presented as "live". Compare the quote and bar timestamps to now.
     now_et = _now_et()
     stale_parts = []
-    if quote and quote.get("t"):
+
+    def _et(ts):
         try:
-            qt = pd.Timestamp(quote["t"]).to_pydatetime()
+            return pd.Timestamp(ts).tz_convert(
+                "America/New_York").tz_localize(None).to_pydatetime() \
+                if pd.Timestamp(ts).tzinfo else pd.Timestamp(ts).to_pydatetime()
+        except Exception:
+            return None
+
+    if quote and quote.get("t"):
+        qt = _et(quote["t"])
+        if qt:
             qage = (now_et - qt).total_seconds() / 60
             if qage > 5:
+                qf = _et(quote.get("fetched_at"))
                 stale_parts.append(
-                    f"quote {qage:.0f} min old (through {qt.strftime('%H:%M')} ET)")
-        except Exception:
-            pass
+                    f"quote {qage:.0f} min old (through {qt.strftime('%H:%M')} ET"
+                    + (f", fetched {qf.strftime('%H:%M')} ET" if qf else "") + ")")
     if len(df_1m):
         bt = df_1m.index[-1].to_pydatetime()
         bage = (now_et - bt).total_seconds() / 60
         if bage > 5:
+            bf = _et(df_1m.attrs.get("fetched_at"))
             stale_parts.append(
-                f"bars {bage:.0f} min old (through {bt.strftime('%H:%M')} ET)")
+                f"bars {bage:.0f} min old (through {bt.strftime('%H:%M')} ET"
+                + (f", fetched {bf.strftime('%H:%M')} ET" if bf else "") + ")")
     data_delayed = bool(stale_parts)
     # Show the live quote mid-price when available — the bar-close price only
     # moves when a new 1-min bar completes, which makes the headline look frozen.
@@ -676,7 +687,8 @@ def detail_view(symbol: str, use_demo: bool,
         st.download_button("Download CSV (1-min)", table.to_csv().encode(),
                            f"{symbol}_1m.csv", "text/csv")
 
-    src = "demo data" if use_demo else "Yahoo Finance"
+    src = "demo data" if use_demo else \
+        ("Alpaca" if data.alpaca_is_configured() else "Yahoo Finance")
     st.caption(f"Data as of {df_1m.index[-1]} · source: {src}"
                + (" · live tracking on" if live else ""))
 
