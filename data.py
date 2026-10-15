@@ -1396,6 +1396,68 @@ def build_scorecard(direction: int, ext: dict, thresholds: dict, strong: bool) -
             "conviction": conviction}
 
 
+def verdict_fragility(trend: dict, adx_d: dict | None, noise_bps: float | None,
+                      min_adx: float, hist_prev_bps: float | None = None) -> list:
+    """Flags for verdict inputs sitting near the engine's own decision boundaries.
+
+    A directional verdict is 'fragile' when an ordinary bar can flip one of its
+    inputs: the RSI vote boundary (52/48), the MACD histogram sign, the EMA9/21
+    cross, or the ADX gate. Margins are measured against the session's typical
+    1-minute noise (median |bar-to-bar| move, in bps), so 'thin' means thin
+    relative to what a single bar normally does — not an arbitrary constant.
+    """
+    flags = []
+    price = trend.get("price")
+    if not (price and price > 0):
+        return flags
+    direction = 1 if trend.get("bias") == "Bullish" else -1
+    ema_sep_bps = direction * (trend["ema9"] - trend["ema21"]) / price * 1e4
+    hist_bps = direction * (trend["macd"] - trend["macdSignal"]) / price * 1e4
+    rsi = trend.get("rsi")
+    cutoff = 52 if direction == 1 else 48
+    adx = (adx_d or {}).get("adx")
+    vol = trend.get("volRatio")
+    noisy = noise_bps and math.isfinite(noise_bps) and noise_bps > 0
+
+    if math.isfinite(ema_sep_bps) and noisy and ema_sep_bps < 2 * noise_bps:
+        flags.append(
+            f"EMA9/EMA21 separated by only {ema_sep_bps:.1f} bps — thinner than "
+            f"~2 minutes of typical noise ({noise_bps:.1f} bps/bar); the trend "
+            f"structure could flip on one bar.")
+    # MACD momentum: how many bars until the histogram crosses its signal at
+    # its current pace?  A static "histogram inside noise" flag fires on ~80%
+    # of 1-minute bars and says nothing; bars-to-flip is the honest measure.
+    if math.isfinite(hist_bps):
+        dh = None
+        if hist_prev_bps is not None and math.isfinite(hist_prev_bps):
+            dh = hist_bps - direction * hist_prev_bps
+        btf = abs(hist_bps / dh) if dh and abs(dh) > 1e-9 \
+            and hist_bps * dh < 0 else None
+        if btf is not None and btf < 3:
+            flags.append(
+                f"MACD histogram {btf:.1f} bars from crossing its signal at its "
+                f"current pace — the momentum vote could flip within minutes.")
+        elif noisy and abs(hist_bps) < 0.5 * noise_bps \
+                and (dh is None or abs(dh) < 0.5 * noise_bps):
+            flags.append(
+                f"MACD histogram stalled within {abs(hist_bps):.1f} bps of its "
+                f"signal — any tick could flip the momentum vote.")
+    if rsi is not None and math.isfinite(rsi) and abs(rsi - cutoff) < 3:
+        flags.append(
+            f"RSI {rsi:.0f} is within 3 points of the {cutoff}/"
+            f"{52 if direction == -1 else 48} vote boundary — one bar could flip "
+            f"the RSI vote.")
+    if adx is not None and math.isfinite(adx) and min_adx <= adx < min_adx + 5:
+        flags.append(
+            f"ADX {adx:.0f} is just above the {min_adx:.0f} gate — a weak bar could "
+            f"drop it below and force Sideways.")
+    if vol is not None and math.isfinite(vol) and vol < 0.5:
+        flags.append(
+            f"Volume running at {vol:.2f}x average — very thin participation "
+            f"behind this verdict.")
+    return flags
+
+
 def classify_verdict(pattern: dict | None, breakout: dict, trend: dict, daily: dict,
                      liquidity: dict, spread: dict | None, thresholds: dict,
                      ext: dict | None = None) -> dict:
@@ -1457,8 +1519,12 @@ def classify_verdict(pattern: dict | None, breakout: dict, trend: dict, daily: d
                  "lower-conviction than a full agreement."))
     reason += (f" Of the four context checks (ADX, relative strength, order flow, OBV), "
                f"{scorecard['supports']} support and {scorecard['contradicts']} contradict.")
+    frag = verdict_fragility(trend, ext.get("adx"), ext.get("noise_bps"),
+                             thresholds.get("min_adx", 20),
+                             ext.get("macd_hist_prev_bps"))
     return {"verdict": trend["bias"], "dir": direction, "reason": reason,
-            "scorecard": scorecard, "conviction": scorecard["conviction"]}
+            "scorecard": scorecard, "conviction": scorecard["conviction"],
+            "fragility": frag}
 
 
 # ---------------------------------------------------------------------------
@@ -2155,6 +2221,11 @@ def analyze_symbol(symbol: str, df_daily: pd.DataFrame, df_1m: pd.DataFrame | No
     session_open = float(td["Open"].iloc[0]) if len(td) else NAN
     change_open = (entry - session_open) / session_open * 100 \
         if math.isfinite(session_open) and session_open > 0 else NAN
+    # Typical 1-minute noise for this session (median |bar-to-bar| move, bps).
+    # The fragility check measures indicator margins against this, so "thin"
+    # means thin relative to what one bar normally does.
+    noise_bps = float(td["Close"].pct_change().abs().median() * 1e4) \
+        if len(td) > 5 else NAN
 
     adx_1m = adx(df_1m, 14)
     adx_daily = adx(df_daily, 14) if df_daily is not None and len(df_daily) >= 29 else \
@@ -2174,9 +2245,17 @@ def analyze_symbol(symbol: str, df_daily: pd.DataFrame, df_1m: pd.DataFrame | No
     flow = order_flow(quote)
     obv = obv_session(df_1m)
 
+    # Previous bar's MACD histogram (bps) so the fragility check can estimate
+    # bars-to-flip for the momentum vote.
+    _mp, _sp = macd_last(closes_1m[:-1])
+    macd_hist_prev_bps = (_mp - _sp) / entry * 1e4 \
+        if math.isfinite(_mp) and math.isfinite(_sp) and entry > 0 else NAN
+
     result = classify_verdict(pattern, breakout, trend, daily, liquidity, spread, th,
                               {"adx": adx_1m, "rs": rs, "rs2": rs2,
-                               "flow": flow, "obv": obv})
+                               "flow": flow, "obv": obv,
+                               "noise_bps": noise_bps,
+                               "macd_hist_prev_bps": macd_hist_prev_bps})
     squeeze = detect_squeeze(df_1m)
     mean_rev = mean_reversion_note(df_1m)
     paired = paired_confirmations(trend, result["dir"])
