@@ -28,9 +28,8 @@ import pandas as pd
 # How far back to download. We always pull 2 years so the indicators
 # (e.g. 50-day average) are valid, then show only the window you pick.
 HISTORY_PERIOD = "2y"
-# Intraday pull: 1-minute bars. The chart plots them directly; the engine
-# resamples them to 5-minute bars (see detail_view), so its tuned logic is
-# unchanged.
+# Intraday pull: 1-minute bars. The chart plots them directly and the engine
+# reads the same 1-minute bars — what you see is what the verdict uses.
 INTRADAY_PERIOD = "5d"
 
 WINDOWS = {"1 month": 21, "3 months": 63, "6 months": 126, "1 year": 252, "2 years": 504}
@@ -218,8 +217,8 @@ def fetch_prices(symbol: str) -> pd.DataFrame:
 def fetch_intraday(symbol: str, period: str = INTRADAY_PERIOD) -> pd.DataFrame:
     """1-minute bars, regular session only (9:30–16:00 ET).
 
-    Alpaca when keys are set, else Yahoo. The chart plots these directly;
-    the engine resamples them to 5-minute bars.
+    Alpaca when keys are set, else Yahoo. The chart plots these directly,
+    and the engine reads the same 1-minute bars.
 
     limit MUST exceed the window's bar count (3 days × 390 = ~1,170):
     Alpaca pages forward from `start`, so a smaller limit returns the
@@ -289,7 +288,7 @@ def demo_intraday(symbol: str, days: int = 3, bars_per_day: int = 390) -> pd.Dat
     """Fake 1-minute bars (regular-session hours) for offline testing.
 
     This is the demo version of the intraday feed: the chart plots it
-    directly, and the engine resamples it to 5-minute bars. (The old
+    directly, and the engine reads the same 1-minute bars. (The old
     separate demo_1m is gone — this feed IS the 1-minute feed now.)
     """
     rng = np.random.default_rng(zlib.crc32((symbol + ":1m").encode()))
@@ -375,13 +374,13 @@ def vwap_series(df: pd.DataFrame) -> pd.Series:
     return out
 
 
-def opening_range(df_5m: pd.DataFrame, minutes: int = 30) -> dict | None:
+def opening_range(df_1m: pd.DataFrame, minutes: int = 30) -> dict | None:
     """Opening-range high/low from the first `minutes` of today's session.
 
     Time-based (not bar-count-based), so it works for any bar size:
     1-minute bars → first 30 bars; 5-minute bars → first 6 bars.
     """
-    sess = session_bars(df_5m)
+    sess = session_bars(df_1m)
     if sess is None or sess.empty:
         return None
     start = sess.index[0]
@@ -413,7 +412,7 @@ def prior_day_pivots(df_daily: pd.DataFrame) -> dict | None:
     return {"P": p, "R1": 2 * p - l, "S1": 2 * p - h}
 
 
-def intraday_frame(df_5m: pd.DataFrame, window: str,
+def intraday_frame(df_1m: pd.DataFrame, window: str,
                    trailing_minutes: int | None = None) -> pd.DataFrame:
     """Display frame for the intraday chart: resampled bars + EMA9/21 + VWAP.
 
@@ -424,17 +423,17 @@ def intraday_frame(df_5m: pd.DataFrame, window: str,
     recent N minutes (the sidebar's trailing window) — the indicators
     still carry the full-history warm-up.
     """
-    if df_5m is None or df_5m.empty:
+    if df_1m is None or df_1m.empty:
         return pd.DataFrame()
     if window == "1h":
-        df = resample_bars(df_5m, "1h").copy()
+        df = resample_bars(df_1m, "1h").copy()
     elif window == "15min":
-        df = resample_bars(df_5m, "15min").copy()
+        df = resample_bars(df_1m, "15min").copy()
     elif window == "5min":
-        df = resample_bars(df_5m, "5min").copy()
+        df = resample_bars(df_1m, "5min").copy()
     else:  # "session": full history as-is; sliced to the latest session
         # below after indicators are warmed up.
-        df = df_5m.copy()
+        df = df_1m.copy()
     if df.empty:
         return df
     closes = df["Close"].astype(float).tolist()
@@ -789,7 +788,7 @@ def adx_label(a: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Candlestick patterns (last 150 minutes of 5-min bars)
+# Candlestick patterns (last 30 one-minute bars — the chart's timeframe)
 # ---------------------------------------------------------------------------
 def _body(c): return abs(c["close"] - c["open"])
 def _rng(c): return (c["high"] - c["low"]) or 1e-9
@@ -909,7 +908,7 @@ def detect_pattern(df: pd.DataFrame) -> dict | None:
 
 
 def check_breakout(df: pd.DataFrame, direction: int) -> dict:
-    """150-minute breakout/breakdown check (session bars only)."""
+    """150-minute breakout/breakdown check (session bars only, 1-min bars)."""
     today = _bar_dicts(session_bars(df))
     if not today:
         return {"confirmed": False, "label": "No regular-session data yet today",
@@ -918,8 +917,8 @@ def check_breakout(df: pd.DataFrame, direction: int) -> dict:
         return {"confirmed": False, "label": "Not enough bars yet this session",
                 "rangeHigh": NAN, "rangeLow": NAN}
     current = today[-1]
-    if len(today) >= 31:
-        prior = today[-31:-1]
+    if len(today) >= 151:
+        prior = today[-151:-1]
         high = max(b["high"] for b in prior)
         low = min(b["low"] for b in prior)
         if direction == 1 and current["close"] > high:
@@ -960,9 +959,15 @@ def current_trend(df: pd.DataFrame, latest_price: float | None = None,
         closes.append(float(latest_price))
     price = closes[-1] if closes else NAN
     ema9, ema21, sma21 = ema_last(closes, 9), ema_last(closes, 21), sma_last(closes, 21)
-    rsi = rsi_last(closes, 14)
+    # Wilder-smoothed RSI(14) — the same series the chart plots, so the vote
+    # matches the RSI value you see.
+    _rs = rsi_series(closes, 14)
+    rsi = _rs[-1] if _rs else NAN
     macd, sig = macd_last(closes)
-    vwap = vwap_last(df)
+    # Session-anchored VWAP — the same line the chart plots (not a trailing
+    # average), so the price-vs-VWAP vote matches what you see.
+    _vw = vwap_series(df)
+    vwap = float(_vw.iloc[-1]) if len(_vw) else NAN
     av = avg_volume(df, 20)
     vols = df["Volume"].fillna(0).tolist()
     lv = latest_volume if latest_volume is not None else (vols[-1] if vols else 0.0)
@@ -1068,23 +1073,23 @@ def relative_strength(df: pd.DataFrame, entry: float, bench_df: pd.DataFrame | N
     stock_chg = (entry - stock_open) / stock_open * 100
     bench_chg = (bench_price - bench_open) / bench_open * 100
     stock60 = bench60 = NAN
-    if len(s_today) >= 13 and len(b_today) >= 13:
-        ref_utc = s_today.index[-13].tz_convert("UTC") \
-            if s_today.index.tz is not None else s_today.index[-13]
+    if len(s_today) >= 61 and len(b_today) >= 61:
+        ref_utc = s_today.index[-61].tz_convert("UTC") \
+            if s_today.index.tz is not None else s_today.index[-61]
         b_utc = b_today.index.tz_convert("UTC") \
             if b_today.index.tz is not None else b_today.index
         match = b_utc[b_utc == ref_utc]
         if len(match):
             b_ref = float(b_today.loc[b_today.index[b_utc == ref_utc][0], "Close"])
-            ref_close = float(s_today["Close"].iloc[-13])
+            ref_close = float(s_today["Close"].iloc[-61])
             if ref_close > 0 and b_ref > 0:
                 stock60 = (entry - ref_close) / ref_close * 100
                 bench60 = (bench_price - b_ref) / b_ref * 100
         else:
             # Cross-timezone sessions (e.g. NSE vs SPY) never share bar
             # timestamps — fall back to positional matching ("~60 min ago").
-            b_ref = float(b_today["Close"].iloc[-13])
-            ref_close = float(s_today["Close"].iloc[-13])
+            b_ref = float(b_today["Close"].iloc[-61])
+            ref_close = float(s_today["Close"].iloc[-61])
             if ref_close > 0 and b_ref > 0:
                 stock60 = (entry - ref_close) / ref_close * 100
                 bench60 = (bench_price - b_ref) / b_ref * 100
@@ -1111,7 +1116,7 @@ def obv_session(df: pd.DataFrame) -> dict:
     if not total_vol > 0:
         return {"available": False, "note": "No volume data this session"}
     session_ratio = obv[-1] / total_vol
-    n = min(12, len(bars) - 1)
+    n = min(60, len(bars) - 1)
     base = len(bars) - 1 - n
     recent_vol = sum(vols[base + 1:])
     recent_ratio = (obv[-1] - obv[base]) / recent_vol if recent_vol > 0 else NAN
@@ -1190,7 +1195,8 @@ def mean_reversion_note(df: pd.DataFrame) -> dict | None:
         return None
     bb = bollinger(closes, 20, 2)
     price = closes[-1]
-    rsi = rsi_last(closes, 14)
+    _rs = rsi_series(closes, 14)
+    rsi = _rs[-1] if _rs else NAN
     if not math.isfinite(bb["upper"]) or not math.isfinite(rsi):
         return None
     if price >= bb["upper"] * 0.995 and rsi >= 70:
@@ -1269,7 +1275,7 @@ def next_levels(entry: float, breakout: dict, bb: dict, vwap: float,
 def risk_plan(df: pd.DataFrame, entry: float, direction: int, atr: float,
               breakout: dict) -> dict:
     """Stop-loss (ATR + structure), measured-move and 2R targets."""
-    lookback = _bar_dicts(df.tail(10))
+    lookback = _bar_dicts(df.tail(50))
     swing_low = min(b["low"] for b in lookback)
     swing_high = max(b["high"] for b in lookback)
     atr_stop = (entry - 1.5 * atr) if direction == 1 else (entry + 1.5 * atr) \
@@ -1480,7 +1486,7 @@ def compute_radar(df: pd.DataFrame, atr: float,
     remaining weights are renormalized, exactly as the HTML does when the
     tape isn't streaming yet.
     """
-    if df is None or len(df) < 40:
+    if df is None or len(df) < 70:
         return None
     bars = _bar_dicts(df.tail(300))
     c = [b["close"] for b in bars]
@@ -1497,26 +1503,26 @@ def compute_radar(df: pd.DataFrame, atr: float,
     e5, e13 = ema_series(c, 5), ema_series(c, 13)
     add("Fast momentum (EMA 5/13)", 0.18,
         0.5 * th((e5[n - 1] - e13[n - 1]) / atr * 1.5)
-        + 0.5 * th((e5[n - 1] - e5[n - 4]) / atr * 2),
-        f"EMA5 {_f2(e5[n - 1] - e13[n - 1])} vs EMA13 · 15m slope {_f2(e5[n - 1] - e5[n - 4])}")
+        + 0.5 * th((e5[n - 1] - e5[n - 16]) / atr * 2),
+        f"EMA5 {_f2(e5[n - 1] - e13[n - 1])} vs EMA13 · 15m slope {_f2(e5[n - 1] - e5[n - 16])}")
 
     e12, e26 = ema_series(c, 12), ema_series(c, 26)
     ml = [a - b for a, b in zip(e12, e26)]
     sg = ema_series(ml, 9)
     hs = [a - b for a, b in zip(ml, sg)]
     add("MACD histogram trend", 0.14,
-        0.7 * th((hs[n - 1] - hs[n - 4]) / atr * 6) + 0.3 * th(hs[n - 1] / atr * 6),
-        f"hist {_f2(hs[n - 1])} · 15m change {_f2(hs[n - 1] - hs[n - 4])}")
+        0.7 * th((hs[n - 1] - hs[n - 16]) / atr * 6) + 0.3 * th(hs[n - 1] / atr * 6),
+        f"hist {_f2(hs[n - 1])} · 15m change {_f2(hs[n - 1] - hs[n - 16])}")
 
     rs = rsi_series(c)
     add("RSI level & slope", 0.10,
-        0.5 * th((rs[n - 1] - 50) / 12) + 0.5 * th((rs[n - 1] - rs[n - 4]) / 6),
-        f"RSI {rs[n - 1]:.0f} · 15m change {_f2(rs[n - 1] - rs[n - 4])}")
+        0.5 * th((rs[n - 1] - 50) / 12) + 0.5 * th((rs[n - 1] - rs[n - 16]) / 6),
+        f"RSI {rs[n - 1]:.0f} · 15m change {_f2(rs[n - 1] - rs[n - 16])}")
 
     add("Price velocity", 0.14,
-        0.6 * th((px - c[n - 7]) / atr / 2) + 0.4 * th((px - c[n - 13]) / atr / 3),
-        f"{_f2((px - c[n - 7]) / c[n - 7] * 100)}% over 30m · "
-        f"{_f2((px - c[n - 13]) / c[n - 13] * 100)}% over 60m")
+        0.6 * th((px - c[n - 31]) / atr / 2) + 0.4 * th((px - c[n - 61]) / atr / 3),
+        f"{_f2((px - c[n - 31]) / c[n - 31] * 100)}% over 30m · "
+        f"{_f2((px - c[n - 61]) / c[n - 61] * 100)}% over 60m")
 
     sw = swing_points(bars[-40:])
     H, L = sw["H"][-2:], sw["L"][-2:]
@@ -1543,7 +1549,7 @@ def compute_radar(df: pd.DataFrame, atr: float,
             f"{_f2(px - vwap)} vs VWAP ${vwap:.2f}")
 
     up = dn = 0.0
-    for i in range(len(bars) - 6, len(bars)):
+    for i in range(len(bars) - 30, len(bars)):
         d = bars[i]["close"] - bars[i - 1]["close"]
         v = bars[i]["volume"]
         if d > 0:
@@ -1552,7 +1558,7 @@ def compute_radar(df: pd.DataFrame, atr: float,
             dn += v
     if up + dn > 0:
         add("Volume pressure (30m)", 0.12, (up - dn) / (up + dn),
-            f"{_f2((up - dn) / (up + dn) * 100)}% net up-volume, last 6 bars")
+            f"{_f2((up - dn) / (up + dn) * 100)}% net up-volume, last 30 bars")
 
     W = sum(x["w"] for x in comps)
     if not W:
@@ -2107,28 +2113,31 @@ DEFAULT_THRESHOLDS = {"min_dollar_vol": 10_000_000, "max_spread_pct": 0.50,
                       "min_adx": 20.0, "rs_tol": 0.25}
 
 
-def analyze_symbol(symbol: str, df_daily: pd.DataFrame, df_5m: pd.DataFrame | None,
-                   df_1m: pd.DataFrame | None = None,
-                   bench_5m: pd.DataFrame | None = None,
-                   bench2_5m: pd.DataFrame | None = None,
+def analyze_symbol(symbol: str, df_daily: pd.DataFrame, df_1m: pd.DataFrame | None,
+                   bench_1m: pd.DataFrame | None = None,
+                   bench2_1m: pd.DataFrame | None = None,
                    bench_ticker: str = "SPY", bench2_ticker: str | None = None,
                    quote: dict | None = None, account_size: float = 0.0,
                    risk_pct: float = 0.0, trades: list | None = None,
                    thresholds: dict | None = None) -> dict:
-    """Run the whole analyzer engine. Returns every section the UI needs."""
+    """Run the whole analyzer engine. Returns every section the UI needs.
+
+    The engine reads 1-minute bars — the same bars and indicator values the
+    chart plots — so what you see is what the verdict is computed from.
+    """
     th = dict(DEFAULT_THRESHOLDS)
     if thresholds:
         th.update(thresholds)
 
     out: dict = {"symbol": symbol, "ok": False}
-    if df_5m is None or len(df_5m) < 31:
-        out["error"] = (f"Not enough 5-min bars for {symbol} "
-                        "(need 31+). Market may be closed or symbol may be invalid.")
+    if df_1m is None or len(df_1m) < 60:
+        out["error"] = (f"Not enough 1-min bars for {symbol} "
+                        "(need 60+). Market may be closed or symbol may be invalid.")
         return out
 
-    pattern = detect_pattern(df_5m)
-    breakout = check_breakout(df_5m, pattern["dir"] if pattern else 0)
-    trend = current_trend(df_5m)
+    pattern = detect_pattern(df_1m)
+    breakout = check_breakout(df_1m, pattern["dir"] if pattern else 0)
+    trend = current_trend(df_1m)
     daily = daily_trend(df_daily)
     liq_value = avg_dollar_volume(df_daily)
     liquidity = {"value": liq_value,
@@ -2136,63 +2145,63 @@ def analyze_symbol(symbol: str, df_daily: pd.DataFrame, df_5m: pd.DataFrame | No
     spread_raw = spread_info(quote)
     spread = {**spread_raw, "ok": spread_raw["pct"] <= th["max_spread_pct"]} \
         if spread_raw else None
-    entry = trend["price"] if math.isfinite(trend["price"]) else float(df_5m["Close"].iloc[-1])
-    atr = atr_last(df_5m, 14)
-    closes_5m = df_5m["Close"].astype(float).tolist()
-    bb = bollinger(closes_5m, 20, 2)
+    entry = trend["price"] if math.isfinite(trend["price"]) else float(df_1m["Close"].iloc[-1])
+    atr = atr_last(df_1m, 14)
+    closes_1m = df_1m["Close"].astype(float).tolist()
+    bb = bollinger(closes_1m, 20, 2)
     levels = next_levels(entry, breakout, bb, trend["vwap"], daily, atr)
 
-    td = session_bars(df_5m)
+    td = session_bars(df_1m)
     session_open = float(td["Open"].iloc[0]) if len(td) else NAN
     change_open = (entry - session_open) / session_open * 100 \
         if math.isfinite(session_open) and session_open > 0 else NAN
 
-    adx_5m = adx(df_5m, 14)
+    adx_1m = adx(df_1m, 14)
     adx_daily = adx(df_daily, 14) if df_daily is not None and len(df_daily) >= 29 else \
         {"adx": NAN, "plusDI": NAN, "minusDI": NAN}
-    bench_price = float(bench_5m["Close"].iloc[-1]) if bench_5m is not None \
-        and len(bench_5m) else None
-    rs = relative_strength(df_5m, entry, bench_5m, bench_price, bench_ticker) \
+    bench_price = float(bench_1m["Close"].iloc[-1]) if bench_1m is not None \
+        and len(bench_1m) else None
+    rs = relative_strength(df_1m, entry, bench_1m, bench_price, bench_ticker) \
         if bench_ticker != symbol else \
         {"available": False, "benchTicker": bench_ticker,
          "note": "Ticker is the benchmark itself"}
     if bench2_ticker:
-        b2_price = float(bench2_5m["Close"].iloc[-1]) if bench2_5m is not None \
-            and len(bench2_5m) else None
-        rs2 = relative_strength(df_5m, entry, bench2_5m, b2_price, bench2_ticker)
+        b2_price = float(bench2_1m["Close"].iloc[-1]) if bench2_1m is not None \
+            and len(bench2_1m) else None
+        rs2 = relative_strength(df_1m, entry, bench2_1m, b2_price, bench2_ticker)
     else:
         rs2 = {"available": False, "benchTicker": None, "note": "No secondary benchmark set"}
     flow = order_flow(quote)
-    obv = obv_session(df_5m)
+    obv = obv_session(df_1m)
 
     result = classify_verdict(pattern, breakout, trend, daily, liquidity, spread, th,
-                              {"adx": adx_5m, "rs": rs, "rs2": rs2,
+                              {"adx": adx_1m, "rs": rs, "rs2": rs2,
                                "flow": flow, "obv": obv})
-    squeeze = detect_squeeze(df_5m)
-    mean_rev = mean_reversion_note(df_5m)
+    squeeze = detect_squeeze(df_1m)
+    mean_rev = mean_reversion_note(df_1m)
     paired = paired_confirmations(trend, result["dir"])
 
-    radar = compute_radar(df_5m, atr)
-    pressure = compute_pressure(df_5m, df_1m, atr, trades)
-    forecast = compute_forecast(radar, pressure, flow, obv, rs, df_5m, atr, entry)
+    radar = compute_radar(df_1m, atr)
+    pressure = compute_pressure(df_1m, df_1m, atr, trades)
+    forecast = compute_forecast(radar, pressure, flow, obv, rs, df_1m, atr, entry)
 
     trade_plan = None
     if result["dir"] != 0:
-        plan = risk_plan(df_5m, entry, result["dir"], atr, breakout)
+        plan = risk_plan(df_1m, entry, result["dir"], atr, breakout)
         size = position_size(account_size, risk_pct, plan["stopDist"], entry)
         trade_plan = {"plan": plan, "size": size}
 
     ctx = {"account_size": account_size, "risk_pct": risk_pct,
            "thresholds": th, "result": result, "daily": daily, "rs": rs,
            "liquidity": liquidity, "spread": spread, "pressure": pressure}
-    provisional = provisional_plan(radar, df_5m, atr, ctx)
+    provisional = provisional_plan(radar, df_1m, atr, ctx)
 
     out.update({
         "ok": True, "pattern": pattern, "breakout": breakout, "trend": trend,
         "daily": daily, "liquidity": liquidity, "spread": spread,
         "entry": entry, "atr": atr, "bb": bb, "levels": levels,
         "sessionOpen": session_open, "changeSinceOpen": change_open,
-        "adx5m": adx_5m, "adxDaily": adx_daily, "rs": rs, "rs2": rs2,
+        "adx1m": adx_1m, "adxDaily": adx_daily, "rs": rs, "rs2": rs2,
         "flow": flow, "obv": obv, "verdict": result, "squeeze": squeeze,
         "meanRev": mean_rev, "paired": paired, "radar": radar,
         "pressure": pressure, "forecast": forecast, "tradePlan": trade_plan,
