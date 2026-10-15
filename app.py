@@ -307,6 +307,14 @@ def detail_view(symbol: str, use_demo: bool,
     h5.metric("ADX", f"{res['adx1m']['adx']:.0f}" if pd.notna(res["adx1m"]["adx"]) else "—")
     h6.metric("Signal", sig.action)
 
+    # Fragile-verdict notification: when 2+ inputs sit near their decision
+    # thresholds (measured against this session's typical 1-minute noise),
+    # warn that conviction could flip on the next bar.
+    frag = v.get("fragility") or []
+    if v["verdict"] != "Sideways" and len(frag) >= 2:
+        st.warning("**Fragile verdict** — conviction could change on the next bar:\n\n" +
+                   "\n".join(f"- {f}" for f in frag))
+
     # Why: reason + scorecard
     with st.expander("Why this verdict", expanded=True):
         st.write(v["reason"])
