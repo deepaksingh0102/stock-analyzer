@@ -61,9 +61,9 @@ def load_daily(symbol: str, use_demo: bool, bucket: int = 0) -> pd.DataFrame:
 
 @st.cache_data(ttl=600, max_entries=32, show_spinner=False)
 def load_intraday(symbol: str, use_demo: bool, bucket: int = 0) -> pd.DataFrame:
-    """Raw 1-minute intraday feed. The chart plots it directly; the engine
-    resamples it to 5-minute bars (see detail_view). No separate 1-minute
-    loader — this feed IS the 1-minute feed."""
+    """Raw 1-minute intraday feed. The chart plots it directly, and the engine
+    reads the same 1-minute bars — what you see is what the verdict uses.
+    No separate loader — this feed IS the 1-minute feed."""
     return data.demo_intraday(symbol) if use_demo else data.fetch_intraday(symbol)
 
 
@@ -184,7 +184,7 @@ with st.sidebar:
                             index=6,
                             help="How much recent history the chart shows. Candles are "
                                  "always 1-minute. The Direction Radar, signal, and forecast "
-                                 "always read 5-minute bars.")
+                                 "read the same 1-minute bars as the chart.")
     use_demo = st.toggle("Demo data (offline / no internet)", value=False)
 
     if signals.alpaca_is_configured():
@@ -225,8 +225,8 @@ def detail_view(symbol: str, use_demo: bool,
                    f"last updated {_now_et().strftime('%H:%M:%S')} ET · "
                    "auto-refresh pauses while this tab is in the background")
     # Tiered freshness: not all data needs the same refresh rate. The quote
-    # and trade tape are tiny and live-feeling (30s); 5-min/1-min bars only
-    # move every 1-5 min (60s); daily bars barely change intraday (5 min).
+    # and trade tape are tiny and live-feeling (30s); 1-min bars only
+    # move every minute (60s); daily bars barely change intraday (5 min).
     # This cuts most of the per-refresh fetching without losing freshness
     # where it matters.
     bucket = _bucket(live, refresh_secs)
@@ -235,15 +235,14 @@ def detail_view(symbol: str, use_demo: bool,
     try:
         with st.spinner(f"Loading {symbol}…"):
             df_daily = load_daily(symbol, use_demo, bucket_slow)
-            # Multi-timeframe: the raw feed is 1-minute bars (chart plots
-            # them directly, new candle every minute). The engine reads
-            # 5-minute bars resampled from the same feed, so its tuned
-            # thresholds, radar, and signals behave exactly as before.
+            # The raw feed is 1-minute bars (chart plots them directly, new
+            # candle every minute). The engine reads the same 1-minute bars,
+            # so the RSI/MACD/EMA values behind the verdict are exactly the
+            # ones plotted on the chart.
             df_1m = load_intraday(symbol, use_demo, bucket_mid)
-            df_5m = data.resample_bars(df_1m, "5min")
-            bench_5m = (data.resample_bars(load_intraday(bench, use_demo, bucket_mid), "5min")
+            bench_1m = (load_intraday(bench, use_demo, bucket_mid)
                         if bench != symbol else None)
-            bench2_5m = (data.resample_bars(load_intraday(bench2, use_demo, bucket_mid), "5min")
+            bench2_1m = (load_intraday(bench2, use_demo, bucket_mid)
                          if bench2 else None)
             quote, quote_note = load_quote(symbol, use_demo, bucket)
             trades = load_trades(symbol, use_demo, bucket)
@@ -253,7 +252,7 @@ def detail_view(symbol: str, use_demo: bool,
         return
 
     res = data.analyze_symbol(
-        symbol, df_daily, df_5m, df_1m, bench_5m, bench2_5m,
+        symbol, df_daily, df_1m, bench_1m, bench2_1m,
         bench_ticker=bench, bench2_ticker=bench2 or None, quote=quote,
         account_size=account_size, risk_pct=risk_pct, trades=trades,
         thresholds=_thresholds())
@@ -262,7 +261,7 @@ def detail_view(symbol: str, use_demo: bool,
         return
 
     v, sig = res["verdict"], signals.analyzer_signal(
-        symbol, df_daily, df_5m, bench_5m,
+        symbol, df_daily, df_1m, bench_1m,
         account_size=account_size, risk_pct=risk_pct, res=res, quote=quote)
 
     # Radar score history (session state, like the HTML's rolling history)
@@ -279,7 +278,7 @@ def detail_view(symbol: str, use_demo: bool,
     h4, h5, h6 = st.columns(3)
     chg = res["changeSinceOpen"]
     # Show the live quote mid-price when available — the bar-close price only
-    # moves when a new 5-min bar completes, which makes the headline look frozen.
+    # moves when a new 1-min bar completes, which makes the headline look frozen.
     si = data.spread_info(quote) if quote else None
     live_px = si["mid"] if si else None
     px_label = f"{symbol} price · live" if live_px else f"{symbol} price"
@@ -288,7 +287,7 @@ def detail_view(symbol: str, use_demo: bool,
     h2.metric("Verdict", v["verdict"])
     h3.metric("Conviction", v["conviction"] or "—")
     h4.metric("RSI (14)", f"{res['trend']['rsi']:.0f}" if pd.notna(res["trend"]["rsi"]) else "—")
-    h5.metric("ADX", f"{res['adx5m']['adx']:.0f}" if pd.notna(res["adx5m"]["adx"]) else "—")
+    h5.metric("ADX", f"{res['adx1m']['adx']:.0f}" if pd.notna(res["adx1m"]["adx"]) else "—")
     h6.metric("Signal", sig.action)
 
     # Why: reason + scorecard
@@ -304,7 +303,7 @@ def detail_view(symbol: str, use_demo: bool,
 
     # Intraday chart: 1-minute candles + EMA9/21 + VWAP + opening-range
     # high/low. The trailing window (sidebar) controls how much recent
-    # history is shown; the engine above reads the resampled 5-minute bars.
+    # history is shown; the engine above reads the same 1-minute bars.
     trailing = CHART_TF_TRAILING.get(chart_tf)
     frame = data.intraday_frame(df_1m, "session", trailing_minutes=trailing)
     or_ = data.opening_range(df_1m)
@@ -337,10 +336,9 @@ def detail_view(symbol: str, use_demo: bool,
                 "Green = price went up in that minute, red = it went down.\n"
                 f"- **Window** — the chart shows {window_desc}. "
                 "Change it with Chart timeframe in the sidebar.\n"
-                "- **Two timeframes** — the chart is the fast 1-minute view. The "
-                "Direction Radar, signal, and forecast below read 5-minute bars "
-                "(resampled from the same feed), so they confirm the slower trend "
-                "while the chart shows the recent action.\n"
+                "- **One timeframe** — the chart, the Direction Radar, the signal, "
+                "and the forecast all read the same 1-minute bars, so the "
+                "indicators you see are the indicators the verdict uses.\n"
                 "- **Orange & blue lines (EMA 9 / EMA 21)** — the average price over the last "
                 "9 / 21 slices. Price above both = uptrend; below both = downtrend.\n"
                 "- **Dark line (Close)** — the closing price at each point in time. Above "
@@ -373,15 +371,15 @@ def detail_view(symbol: str, use_demo: bool,
         # Divergence alert (radar vs slow trend votes)
         tb = res["trend"]["bias"]
         if tb == "Bullish" and r["score"] <= -20:
-            st.warning("Divergence: 5-min trend votes read Bullish, but momentum has turned "
+            st.warning("Divergence: 1-min trend votes read Bullish, but momentum has turned "
                        "down. The slow indicators haven't caught up yet.")
         elif tb == "Bearish" and r["score"] >= 20:
-            st.warning("Divergence: 5-min trend votes read Bearish, but momentum has turned "
+            st.warning("Divergence: 1-min trend votes read Bearish, but momentum has turned "
                        "up. The slow indicators haven't caught up yet.")
         st.caption("Reading: ±20 = leaning, ±45 = strong. Momentum/pressure gauge, not a "
                    "forecast — it can't see news.")
     else:
-        st.info("Not enough 5-min bars for the radar yet (need 40+).")
+        st.info("Not enough 1-min bars for the radar yet (need 70+).")
 
     # ---- Live pressure checks ----
     st.subheader("Live Pressure Checks")
@@ -427,7 +425,7 @@ def detail_view(symbol: str, use_demo: bool,
     t, dly, pat, bo = res["trend"], res["daily"], res["pattern"], res["breakout"]
     tp_rows = [
         ("Last price", fmt(res["entry"])),
-        ("Intraday (5-min) trend", f"{t['bias']} ({t['bull']} bullish / {t['bear']} bearish votes)"),
+        ("Intraday (1-min) trend", f"{t['bias']} ({t['bull']} bullish / {t['bear']} bearish votes)"),
         ("Daily trend", f"{dly['bias']}"
          + (f" ({dly['bull']} bull / {dly['bear']} bear votes)" if "bull" in dly else "")),
         ("Candlestick pattern (150m)",
@@ -461,18 +459,18 @@ def detail_view(symbol: str, use_demo: bool,
 
     # ---- ADX ----
     st.subheader("Trend Strength (ADX)")
-    a5, ad = res["adx5m"], res["adxDaily"]
+    a5, ad = res["adx1m"], res["adxDaily"]
     if pd.notna(a5["adx"]):
         st.dataframe(pd.DataFrame([
-            ("ADX(14), 5-min", f"{a5['adx']:.1f} — {data.adx_label(a5['adx'])}"),
-            ("+DI / −DI (5-min)",
+            ("ADX(14), 1-min", f"{a5['adx']:.1f} — {data.adx_label(a5['adx'])}"),
+            ("+DI / −DI (1-min)",
              f"{a5['plusDI']:.1f} / {a5['minusDI']:.1f} "
              f"({'buyers' if a5['plusDI'] > a5['minusDI'] else 'sellers'} directing)"),
             ("ADX(14), daily",
              f"{ad['adx']:.1f} — {data.adx_label(ad['adx'])}" if pd.notna(ad["adx"]) else "n/a"),
         ], columns=["Field", "Value"]), hide_index=True, use_container_width=True)
     else:
-        st.info("Not enough 5-min bars for ADX (needs 29+).")
+        st.info("Not enough 1-min bars for ADX (needs 29+).")
 
     # ---- Order flow / OBV ----
     st.subheader("Order Flow & Volume Accumulation")
@@ -555,7 +553,7 @@ def detail_view(symbol: str, use_demo: bool,
     if res["tradePlan"]:
         pl, sz = res["tradePlan"]["plan"], res["tradePlan"]["size"]
         st.dataframe(pd.DataFrame([
-            ("ATR(14), 5-min", f"${res['atr']:.3f}" if pd.notna(res["atr"]) else "n/a"),
+            ("ATR(14), 1-min", f"${res['atr']:.3f}" if pd.notna(res["atr"]) else "n/a"),
             ("Entry (reference)", f"${res['entry']:.2f}"),
             ("Stop-loss", f"${pl['stop']:.2f} ({pl['stopDist']:.2f} away)"),
             ("Measured-move target",
@@ -620,13 +618,13 @@ def detail_view(symbol: str, use_demo: bool,
 
     # Raw data
     with st.expander("Data table"):
-        table = df_5m.tail(78)[["Open", "High", "Low", "Close", "Volume"]]
+        table = df_1m.tail(120)[["Open", "High", "Low", "Close", "Volume"]]
         st.dataframe(table.iloc[::-1].round(2), use_container_width=True)
-        st.download_button("Download CSV (5-min)", table.to_csv().encode(),
-                           f"{symbol}_5m.csv", "text/csv")
+        st.download_button("Download CSV (1-min)", table.to_csv().encode(),
+                           f"{symbol}_1m.csv", "text/csv")
 
     src = "demo data" if use_demo else "Yahoo Finance"
-    st.caption(f"Data as of {df_5m.index[-1]} · source: {src}"
+    st.caption(f"Data as of {df_1m.index[-1]} · source: {src}"
                + (" · live tracking on" if live else ""))
 
 
