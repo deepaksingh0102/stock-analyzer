@@ -203,6 +203,11 @@ def fetch_alpaca_quote(symbol: str, feed: str | None = None) -> dict | None:
             "America/New_York").tz_localize(None).to_pydatetime()
     except Exception:
         pass
+    try:
+        from datetime import datetime, timezone
+        out["fetched_at"] = datetime.now(timezone.utc)
+    except Exception:
+        pass
     return out
 
 
@@ -246,7 +251,13 @@ def fetch_intraday(symbol: str, period: str = INTRADAY_PERIOD) -> pd.DataFrame:
         if df is None or df.empty:
             raise ValueError(f"No intraday data found for '{symbol}'.")
         df = _clean_ohlc(df)
-    return regular_session_only(df)
+    df = regular_session_only(df)
+    # When this fetch completed — lets the app distinguish "the feed served
+    # stale bars" from "the app hasn't refetched". Survives the cache
+    # (attrs pickle with the DataFrame).
+    from datetime import datetime, timezone
+    df.attrs["fetched_at"] = datetime.now(timezone.utc)
+    return df
 
 
 def fetch_quote(symbol: str) -> tuple[dict | None, str]:
