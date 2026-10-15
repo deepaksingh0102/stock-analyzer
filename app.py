@@ -294,11 +294,32 @@ def detail_view(symbol: str, use_demo: bool,
     h1, h2, h3 = st.columns(3)
     h4, h5, h6 = st.columns(3)
     chg = res["changeSinceOpen"]
+    # Data-freshness guard: a delayed feed (e.g. a lapsed Alpaca data
+    # subscription silently serving ~15-min-old quotes/bars) must never be
+    # presented as "live". Compare the quote and bar timestamps to now.
+    now_et = _now_et()
+    stale_parts = []
+    if quote and quote.get("t"):
+        try:
+            qt = pd.Timestamp(quote["t"]).to_pydatetime()
+            qage = (now_et - qt).total_seconds() / 60
+            if qage > 5:
+                stale_parts.append(
+                    f"quote {qage:.0f} min old (through {qt.strftime('%H:%M')} ET)")
+        except Exception:
+            pass
+    if len(df_1m):
+        bt = df_1m.index[-1].to_pydatetime()
+        bage = (now_et - bt).total_seconds() / 60
+        if bage > 5:
+            stale_parts.append(
+                f"bars {bage:.0f} min old (through {bt.strftime('%H:%M')} ET)")
+    data_delayed = bool(stale_parts)
     # Show the live quote mid-price when available — the bar-close price only
     # moves when a new 1-min bar completes, which makes the headline look frozen.
     si = data.spread_info(quote) if quote else None
     live_px = si["mid"] if si else None
-    px_label = f"{symbol} price · live" if live_px else f"{symbol} price"
+    px_label = f"{symbol} price · live" if (live_px and not data_delayed) else f"{symbol} price"
     h1.metric(px_label, fmt(live_px if live_px else res["entry"]),
               None if pd.isna(chg) else f"{chg:+.2f}% since open")
     h2.metric("Verdict", v["verdict"])
@@ -306,6 +327,13 @@ def detail_view(symbol: str, use_demo: bool,
     h4.metric("RSI (14)", f"{res['trend']['rsi']:.0f}" if pd.notna(res["trend"]["rsi"]) else "—")
     h5.metric("ADX", f"{res['adx1m']['adx']:.0f}" if pd.notna(res["adx1m"]["adx"]) else "—")
     h6.metric("Signal", sig.action)
+
+    # Delayed-data warning (above the verdict aids — data integrity first).
+    if data_delayed:
+        st.warning("**Market data is delayed** — " + "; ".join(stale_parts) +
+                   ". Price, chart and verdict may not reflect the current market. "
+                   "If this persists during market hours, check your Alpaca "
+                   "market-data subscription.")
 
     # Fragile-verdict notification: when 2+ inputs sit near their decision
     # thresholds (measured against this session's typical 1-minute noise),
