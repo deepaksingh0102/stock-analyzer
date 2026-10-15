@@ -264,9 +264,26 @@ def detail_view(symbol: str, use_demo: bool,
         symbol, df_daily, df_1m, bench_1m,
         account_size=account_size, risk_pct=risk_pct, res=res, quote=quote)
 
-    # Radar score history (session state, like the HTML's rolling history)
-    hist_key = f"radar_hist_{symbol}"
+    # Radar score history: backfilled from today's 1-minute bars (5-min steps)
+    # so it covers the session even when the tab was just opened, then live
+    # points append every 30s on top. Keyed by symbol+date so each session
+    # starts fresh.
+    today_str = df_1m.index[-1].date().isoformat() if len(df_1m) else "nodate"
+    hist_key = f"radar_hist_{symbol}_{today_str}"
     hist = st.session_state.setdefault(hist_key, [])
+    if f"{hist_key}_seeded" not in st.session_state and res.get("ok"):
+        seed_pts = []
+        sess_idx = df_1m.index[df_1m.index.date == df_1m.index[-1].date()]
+        atr_v = res.get("atr")
+        for i in range(0, len(sess_idx), 5):
+            sub = df_1m.loc[:sess_idx[i]]
+            r = data.compute_radar(sub, atr_v)
+            if r:
+                seed_pts.append((sess_idx[i].to_pydatetime(), r["score"]))
+        # Keep seeds strictly before any live point already recorded.
+        hist.extend(seed_pts)
+        hist.sort(key=lambda p: p[0])
+        st.session_state[f"{hist_key}_seeded"] = True
     if res["radar"]:
         now = _now_et()
         if not hist or (now - hist[-1][0]).total_seconds() >= 30:
