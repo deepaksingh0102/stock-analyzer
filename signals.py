@@ -34,12 +34,12 @@ def alpaca_is_configured() -> bool:
 
 
 def get_signal(symbol: str, df_daily: pd.DataFrame,
-               df_5m: pd.DataFrame | None = None,
-               bench_5m: pd.DataFrame | None = None,
+               df_1m: pd.DataFrame | None = None,
+               bench_1m: pd.DataFrame | None = None,
                account_size: float = 0.0, risk_pct: float = 0.0,
                res: dict | None = None, quote: dict | None = None) -> Signal:
     """Signal for one symbol, from the analyzer's hard-gate verdict."""
-    return analyzer_signal(symbol, df_daily, df_5m, bench_5m,
+    return analyzer_signal(symbol, df_daily, df_1m, bench_1m,
                            account_size=account_size, risk_pct=risk_pct,
                            res=res, quote=quote)
 
@@ -51,8 +51,8 @@ _CONVICTION_TO_CONFIDENCE = {"High": 0.75, "Moderate": 0.60, "Low": 0.45}
 
 
 def analyzer_signal(symbol: str, df_daily: pd.DataFrame,
-                    df_5m: pd.DataFrame | None = None,
-                    bench_5m: pd.DataFrame | None = None,
+                    df_1m: pd.DataFrame | None = None,
+                    bench_1m: pd.DataFrame | None = None,
                     account_size: float = 0.0, risk_pct: float = 0.0,
                     res: dict | None = None, quote: dict | None = None) -> Signal:
     """Verdict -> signal. Falls back to the demo rule when no intraday data.
@@ -60,13 +60,13 @@ def analyzer_signal(symbol: str, df_daily: pd.DataFrame,
     Pass a precomputed ``res`` (from ``data.analyze_symbol``) and ``quote``
     to avoid running the analysis twice.
     """
-    if df_5m is None or len(df_5m) < 31:
+    if df_1m is None or len(df_1m) < 60:
         return demo_signal(df_daily)
     if res is None:
         if quote is None:
             quote, _ = engine.fetch_quote(symbol)
         res = engine.analyze_symbol(
-            symbol, df_daily, df_5m, bench_5m=bench_5m,
+            symbol, df_daily, df_1m, bench_1m=bench_1m,
             bench_ticker=config.BENCHMARK, quote=quote,
             account_size=account_size or config.ACCOUNT_SIZE,
             risk_pct=risk_pct or config.RISK_PCT,
