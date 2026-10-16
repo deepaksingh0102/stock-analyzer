@@ -139,8 +139,10 @@ def status_icon(state: str) -> str:
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("Search")
-    symbol = st.text_input("Stock symbol", value=config.DEFAULT_SYMBOL,
-                           help="e.g. AAPL, MSFT, TSLA, RELIANCE.NS").strip().upper()
+    # Keyed (not return-valued): the detail fragment reads the symbol from
+    # session state instead of taking it as an argument — see detail_view.
+    st.text_input("Stock symbol", value=config.DEFAULT_SYMBOL, key="symbol_input",
+                  help="Type a symbol and press Enter — e.g. AAPL, MSFT, INTC")
 
     # Benchmarks are fixed (SPY primary) rather than sidebar inputs.
     bench = config.BENCHMARK
@@ -215,8 +217,13 @@ CHART_TF_TRAILING = {"5 minutes": 5, "15 minutes": 15, "1 hour": 60,
 # Tab 1: one symbol in detail
 # ---------------------------------------------------------------------------
 @st.fragment(run_every=refresh_secs if live else None)
-def detail_view(symbol: str, use_demo: bool,
+def detail_view(use_demo: bool,
                 live: bool, refresh_secs: int, chart_tf: str = "Since market open"):
+    # The symbol lives in session state, not in the fragment's arguments: with
+    # run_every active, the fragment's refresh timer re-invokes it with the
+    # arguments captured at its first invocation, so a newly typed symbol
+    # passed as an argument would never take effect in the rendered view.
+    symbol = st.session_state.get("symbol_input", config.DEFAULT_SYMBOL).strip().upper()
     if not symbol:
         st.info("Type a stock symbol in the sidebar to begin.")
         return
@@ -296,8 +303,14 @@ def detail_view(symbol: str, use_demo: bool,
     chg = res["changeSinceOpen"]
     # Data-freshness guard: a delayed feed (e.g. a lapsed Alpaca data
     # subscription silently serving ~15-min-old quotes/bars) must never be
-    # presented as "live". Compare the quote and bar timestamps to now.
+    # presented as "live". Compare the quote and bar timestamps to now —
+    # but only during regular market hours. After the close the last 1-min
+    # bar is 15:59 ET and after-hours quotes end ~20:00 ET, so flagging
+    # those as "delayed" would be a false alarm.
     now_et = _now_et()
+    in_session = (now_et.weekday() < 5 and
+                  (9, 30) <= (now_et.hour, now_et.minute) <= (16, 0))
+    market_closed = not in_session
     stale_parts = []
 
     def _et(ts):
@@ -308,29 +321,31 @@ def detail_view(symbol: str, use_demo: bool,
         except Exception:
             return None
 
-    if quote and quote.get("t"):
-        qt = _et(quote["t"])
-        if qt:
-            qage = (now_et - qt).total_seconds() / 60
-            if qage > 5:
-                qf = _et(quote.get("fetched_at"))
+    if in_session:
+        if quote and quote.get("t"):
+            qt = _et(quote["t"])
+            if qt:
+                qage = (now_et - qt).total_seconds() / 60
+                if qage > 5:
+                    qf = _et(quote.get("fetched_at"))
+                    stale_parts.append(
+                        f"quote {qage:.0f} min old (through {qt.strftime('%H:%M')} ET"
+                        + (f", fetched {qf.strftime('%H:%M')} ET" if qf else "") + ")")
+        if len(df_1m):
+            bt = df_1m.index[-1].to_pydatetime()
+            bage = (now_et - bt).total_seconds() / 60
+            if bage > 5:
+                bf = _et(df_1m.attrs.get("fetched_at"))
                 stale_parts.append(
-                    f"quote {qage:.0f} min old (through {qt.strftime('%H:%M')} ET"
-                    + (f", fetched {qf.strftime('%H:%M')} ET" if qf else "") + ")")
-    if len(df_1m):
-        bt = df_1m.index[-1].to_pydatetime()
-        bage = (now_et - bt).total_seconds() / 60
-        if bage > 5:
-            bf = _et(df_1m.attrs.get("fetched_at"))
-            stale_parts.append(
-                f"bars {bage:.0f} min old (through {bt.strftime('%H:%M')} ET"
-                + (f", fetched {bf.strftime('%H:%M')} ET" if bf else "") + ")")
+                    f"bars {bage:.0f} min old (through {bt.strftime('%H:%M')} ET"
+                    + (f", fetched {bf.strftime('%H:%M')} ET" if bf else "") + ")")
     data_delayed = bool(stale_parts)
     # Show the live quote mid-price when available — the bar-close price only
     # moves when a new 1-min bar completes, which makes the headline look frozen.
     si = data.spread_info(quote) if quote else None
     live_px = si["mid"] if si else None
-    px_label = f"{symbol} price · live" if (live_px and not data_delayed) else f"{symbol} price"
+    px_label = f"{symbol} price · live" if (live_px and in_session and not data_delayed) \
+        else f"{symbol} price"
     h1.metric(px_label, fmt(live_px if live_px else res["entry"]),
               None if pd.isna(chg) else f"{chg:+.2f}% since open")
     h2.metric("Verdict", v["verdict"])
@@ -340,11 +355,15 @@ def detail_view(symbol: str, use_demo: bool,
     h6.metric("Signal", sig.action)
 
     # Delayed-data warning (above the verdict aids — data integrity first).
+    # Outside market hours the "delayed" check doesn't apply; a quiet note
+    # replaces the alarm so last-session data isn't misread as broken.
     if data_delayed:
         st.warning("**Market data is delayed** — " + "; ".join(stale_parts) +
                    ". Price, chart and verdict may not reflect the current market. "
                    "If this persists during market hours, check your Alpaca "
                    "market-data subscription.")
+    elif market_closed:
+        st.caption("US market is closed — showing data from the last regular session.")
 
     # Fragile-verdict notification: when 2+ inputs sit near their decision
     # thresholds (measured against this session's typical 1-minute noise),
@@ -747,7 +766,7 @@ def watchlist_view(watchlist_text: str, use_demo: bool,
 
 
 with tab_detail:
-    detail_view(symbol, use_demo, live, refresh_secs, chart_tf)
+    detail_view(use_demo, live, refresh_secs, chart_tf)
 with tab_movers:
     movers_view(use_demo, live, refresh_secs)
 with tab_watch:
