@@ -167,7 +167,7 @@ with st.sidebar:
     watchlist_text = st.text_area("Symbols (comma separated)", value=config.DEFAULT_WATCHLIST)
 
     st.header("Settings")
-    live = st.toggle("Live tracking (auto-refresh)", value=False,
+    live = st.toggle("Live tracking (auto-refresh)", value=True,
                      help="When on, the analysis re-runs automatically at the interval below.")
     refresh_secs = st.number_input("Refresh every (seconds)", min_value=30, max_value=3600,
                                    value=max(config.AUTO_REFRESH_SECONDS, 30), step=5,
@@ -311,6 +311,10 @@ def detail_view(use_demo: bool,
     in_session = (now_et.weekday() < 5 and
                   (9, 30) <= (now_et.hour, now_et.minute) <= (16, 0))
     market_closed = not in_session
+    # In the first minutes after the open the latest completed bar is still
+    # yesterday's 15:59 — the feed isn't delayed, it's just warming up. Only
+    # judge freshness once the session is underway.
+    session_warm = in_session and (now_et.hour, now_et.minute) >= (9, 35)
     stale_parts = []
 
     def _et(ts):
@@ -321,7 +325,7 @@ def detail_view(use_demo: bool,
         except Exception:
             return None
 
-    if in_session:
+    if session_warm:
         if quote and quote.get("t"):
             qt = _et(quote["t"])
             if qt:
@@ -357,6 +361,8 @@ def detail_view(use_demo: bool,
     # Delayed-data warning (above the verdict aids — data integrity first).
     # Outside market hours the "delayed" check doesn't apply; a quiet note
     # replaces the alarm so last-session data isn't misread as broken.
+    # When live tracking is off, stale-looking data just means no refresh —
+    # say so instead of blaming the feed.
     if data_delayed:
         st.warning("**Market data is delayed** — " + "; ".join(stale_parts) +
                    ". Price, chart and verdict may not reflect the current market. "
@@ -364,6 +370,9 @@ def detail_view(use_demo: bool,
                    "market-data subscription.")
     elif market_closed:
         st.caption("US market is closed — showing data from the last regular session.")
+    elif not live:
+        st.caption("Live tracking is off — this is a one-time snapshot. "
+                   "Turn on **Live tracking** in the sidebar for auto-refresh.")
 
     # Fragile-verdict notification: when 2+ inputs sit near their decision
     # thresholds (measured against this session's typical 1-minute noise),
