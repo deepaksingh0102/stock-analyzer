@@ -10,8 +10,8 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
                    window_label: str = "",
                    pivots: dict | None = None) -> go.Figure:
     """Intraday candles + close line, EMA 9/21, VWAP, opening-range lines,
-    standard pivot lines (P/R1/S1 from the prior day), Fibonacci retracement
-    of the visible swing, volume, MACD, RSI, ADX with +DI/-DI."""
+    standard pivot lines (P/R1/S1 from the prior day),
+    volume, MACD, RSI, ADX with +DI/-DI."""
     import math
     title = f"{symbol} — {window_label}" if window_label else f"{symbol} intraday"
     fig = make_subplots(
@@ -72,25 +72,6 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
                 fig.add_hline(y=v, line_dash="dot", line_color="#64748b",
                               line_width=1.5, row=1, col=1,
                               annotation_text=f"{label} {v:,.2f}",
-                              annotation_position="bottom right")
-
-    # Fibonacci retracement of the visible window's swing (0% at the
-    # window high, 100% at the window low). Levels always fall inside the
-    # displayed range, so they never stretch the y-axis. Dark-gold dotted,
-    # thin, so they sit visually behind the signal lines.
-    if not df.empty and "High" in df.columns and "Low" in df.columns:
-        _hi = float(df["High"].max())
-        _lo = float(df["Low"].min())
-        if math.isfinite(_hi) and math.isfinite(_lo) and _hi > _lo:
-            _rng = _hi - _lo
-            for _pct, _tag in ((0.0, "0%"), (0.236, "23.6%"),
-                               (0.382, "38.2%"), (0.5, "50%"),
-                               (0.618, "61.8%"), (0.786, "78.6%"),
-                               (1.0, "100%")):
-                _v = _hi - _rng * _pct
-                fig.add_hline(y=_v, line_dash="dot", line_color="#ca8a04",
-                              line_width=1, row=1, col=1,
-                              annotation_text=f"Fib {_tag} {_v:,.2f}",
                               annotation_position="bottom right")
 
     # Entry / exit levels from the signal
