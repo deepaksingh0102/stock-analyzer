@@ -457,8 +457,9 @@ def intraday_frame(df_1m: pd.DataFrame, window: str,
         return df
     closes = df["Close"].astype(float).tolist()
     df["EMA9"] = ema_series(closes, 9)
-    df["EMA15"] = ema_series(closes, 15)
     df["EMA21"] = ema_series(closes, 21)
+    _adx_s, _pdi_s, _mdi_s = adx_series(df)
+    df["ADX"], df["plusDI"], df["minusDI"] = _adx_s, _pdi_s, _mdi_s
     df["VWAP"] = vwap_series(df).values
     df["RSI"] = rsi_series(closes, 14)
     df["MACD"] = df["Close"].ewm(span=12, adjust=False).mean() \
@@ -792,6 +793,51 @@ def adx(df: pd.DataFrame, n: int = 14) -> dict:
     for i in range(n, len(dxs)):
         a = (a * (n - 1) + dxs[i]) / n
     return {"adx": a, "plusDI": pDI, "minusDI": mDI}
+
+
+def adx_series(df: pd.DataFrame, n: int = 14):
+    """ADX / +DI / -DI as full series — the same Wilder math as adx(),
+    recorded at every bar, so the chart plots exactly what the verdict
+    engine reads. Values before the warm-up completes are NaN; the last
+    values equal adx(df) exactly."""
+    size = len(df)
+    pdi_out = [NAN] * size
+    mdi_out = [NAN] * size
+    adx_out = [NAN] * size
+    if size >= 2 * n + 1:
+        h = df["High"].astype(float).tolist()
+        l = df["Low"].astype(float).tolist()
+        c = df["Close"].astype(float).tolist()
+        tr, pdm, mdm = [], [], []
+        for i in range(1, size):
+            up, dn = h[i] - h[i - 1], l[i - 1] - l[i]
+            pdm.append(up if (up > dn and up > 0) else 0.0)
+            mdm.append(dn if (dn > up and dn > 0) else 0.0)
+            tr.append(max(h[i] - l[i], abs(h[i] - c[i - 1]),
+                          abs(l[i] - c[i - 1])))
+        sTR, sP, sM = sum(tr[:n]), sum(pdm[:n]), sum(mdm[:n])
+        dxs = []  # (bar index, DX)
+        for i in range(n - 1, len(tr)):
+            if i >= n:
+                sTR = sTR - sTR / n + tr[i]
+                sP = sP - sP / n + pdm[i]
+                sM = sM - sM / n + mdm[i]
+            pDI = 100 * sP / sTR if sTR else 0.0
+            mDI = 100 * sM / sTR if sTR else 0.0
+            bar = i + 1
+            pdi_out[bar] = pDI
+            mdi_out[bar] = mDI
+            s = pDI + mDI
+            dxs.append((bar, 100 * abs(pDI - mDI) / s if s else 0.0))
+        if len(dxs) >= n:
+            a = sum(d for _, d in dxs[:n]) / n
+            adx_out[dxs[n - 1][0]] = a
+            for bar, d in dxs[n:]:
+                a = (a * (n - 1) + d) / n
+                adx_out[bar] = a
+    return (pd.Series(adx_out, index=df.index),
+            pd.Series(pdi_out, index=df.index),
+            pd.Series(mdi_out, index=df.index))
 
 
 def adx_label(a: float) -> str:
