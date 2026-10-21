@@ -77,17 +77,15 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
                               annotation_position="bottom right")
 
     # Price-action levels from the prior day (the book's AHPMB levels):
-    # prior-day high / close / low, dark-amber dashed. Same 2.5% proximity
-    # rule as the pivots — a distant level never stretches the axis or
-    # clutters the panel.
+    # prior-day high / close / low, dark-amber dashed. Always drawn — these
+    # three are primary levels the trader asked to see (unlike the pivots
+    # above, which keep the 2.5% proximity rule as secondary references).
     if pa_levels and not df.empty:
-        ref = float(df["Close"].iloc[-1])
         for key, label, pos in (("PDH", "PDH", "top right"),
                                 ("PDC", "PDC", "bottom right"),
                                 ("PDL", "PDL", "bottom right")):
             v = pa_levels.get(key)
-            if (v is not None and math.isfinite(v) and ref > 0
-                    and abs(v - ref) / ref <= 0.025):
+            if v is not None and math.isfinite(v):
                 fig.add_hline(y=v, line_dash="dash", line_color="#b45309",
                               line_width=1.5, row=1, col=1,
                               annotation_text=f"{label} {v:,.2f}",
