@@ -400,6 +400,7 @@ def detail_view(use_demo: bool,
     frame = data.intraday_frame(df_1m, "session", trailing_minutes=trailing)
     or_ = data.opening_range(df_1m)
     pivots = data.prior_day_pivots(df_daily)
+    pa_levels = data.prior_day_levels(df_daily)
     if frame.empty:
         st.info("Not enough intraday data to draw the chart.")
     else:
@@ -409,7 +410,7 @@ def detail_view(use_demo: bool,
             or_low=or_["low"] if or_ else None,
             window_label=(f"Last {chart_tf}" if trailing is not None
                           else "Since market open"),
-            pivots=pivots),
+            pivots=pivots, pa_levels=pa_levels),
             use_container_width=True,
             key=f"intraday_{symbol}_{chart_tf.replace(' ', '_')}")
         st.caption(data.frame_caption(frame, "1 minute"))
@@ -440,14 +441,22 @@ def detail_view(use_demo: bool,
                 "- **Green / red dashed lines** — the highest and lowest price of the first "
                 "30 minutes (the \"opening range\"). Breaking above or below it often sets "
                 "the tone for the rest of the day.\n"
+                "- **Amber dashed lines (PDH / PDC / PDL)** — yesterday's high, close, and low. "
+                "Price-action traders treat yesterday's high and close as hard resistance into "
+                "the open: a break above them on volume is a breakout; a rejection is a fade. "
+                "(Only drawn when price is near them.)\n"
                 "- **Volume bars** — how much traded in each slice. Tall bars = strong participation.\n"
                 "- **RSI (0–100)** — momentum energy. Above 70 = overbought (buyers may be tired); "
                 "below 30 = oversold (sellers may be tired).\n"
                 "- **MACD** — momentum direction. Blue line crossing above orange = momentum turning "
                 "up; crossing below = turning down.\n"
-                "- **ADX / DI (bottom panel)** — trend *strength*, not direction. The dark ADX line "
+                "- **ADX / DI** — trend *strength*, not direction. The dark ADX line "
                 "above the dotted 25 line = a real trend; below 20 = chop. The green +DI above the "
-                "red -DI = buyers in control; red above green = sellers.")
+                "red -DI = buyers in control; red above green = sellers.\n"
+                "- **Stochastic (bottom panel)** — momentum shifts. Blue %K crossing above orange "
+                "%D from below 20 = momentum turning up; crossing down from above 80 = turning down. "
+                "Price-action traders use it as confirmation at a level — a cross right at PDH or "
+                "support means more than one mid-chart.")
 
     # ---- Direction Radar ----
     st.subheader("Direction Radar — what's changing right now")
