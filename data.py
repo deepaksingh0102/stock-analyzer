@@ -431,6 +431,33 @@ def prior_day_pivots(df_daily: pd.DataFrame) -> dict | None:
     return {"P": p, "R1": 2 * p - l, "S1": 2 * p - h}
 
 
+def prior_day_levels(df_daily: pd.DataFrame) -> dict | None:
+    """The price-action book's prior-day levels (its AHPMB levels) from the
+    same prior COMPLETED daily bar the pivots use: PDH / PDC / PDL."""
+    if df_daily is None or df_daily.empty:
+        return None
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    dates = df_daily.index.date
+    prior = df_daily[dates < today]
+    bar = prior.iloc[-1] if not prior.empty else None
+    if bar is None:
+        return None
+    h, l, c = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
+    if not all(math.isfinite(x) for x in (h, l, c)) or h <= 0 or l <= 0:
+        return None
+    return {"PDH": h, "PDC": c, "PDL": l}
+
+
+def stoch_series(df: pd.DataFrame, k: int = 14, d: int = 3):
+    """Stochastic %K / %D — identical math to the screener's stoch_kd:
+    %K = 100 * (C - LL14) / (HH14 - LL14), %D = 3-bar mean of %K.
+    NaN until 14 bars exist."""
+    ll = df["Low"].rolling(k).min()
+    hh = df["High"].rolling(k).max()
+    pk = 100.0 * (df["Close"] - ll) / (hh - ll).replace(0.0, np.nan)
+    return pk, pk.rolling(d).mean()
+
+
 def intraday_frame(df_1m: pd.DataFrame, window: str,
                    trailing_minutes: int | None = None) -> pd.DataFrame:
     """Display frame for the intraday chart: resampled bars + EMA9/21 + VWAP.
@@ -460,6 +487,8 @@ def intraday_frame(df_1m: pd.DataFrame, window: str,
     df["EMA21"] = ema_series(closes, 21)
     _adx_s, _pdi_s, _mdi_s = adx_series(df)
     df["ADX"], df["plusDI"], df["minusDI"] = _adx_s, _pdi_s, _mdi_s
+    _pk_s, _pd_s = stoch_series(df)
+    df["StochK"], df["StochD"] = _pk_s, _pd_s
     df["VWAP"] = vwap_series(df).values
     df["RSI"] = rsi_series(closes, 14)
     df["MACD"] = df["Close"].ewm(span=12, adjust=False).mean() \
