@@ -444,7 +444,10 @@ def detail_view(use_demo: bool,
                 "- **RSI (0–100)** — momentum energy. Above 70 = overbought (buyers may be tired); "
                 "below 30 = oversold (sellers may be tired).\n"
                 "- **MACD** — momentum direction. Blue line crossing above orange = momentum turning "
-                "up; crossing below = turning down.")
+                "up; crossing below = turning down.\n"
+                "- **ADX / DI (bottom panel)** — trend *strength*, not direction. The dark ADX line "
+                "above the dotted 25 line = a real trend; below 20 = chop. The green +DI above the "
+                "red -DI = buyers in control; red above green = sellers.")
 
     # ---- Direction Radar ----
     st.subheader("Direction Radar — what's changing right now")
