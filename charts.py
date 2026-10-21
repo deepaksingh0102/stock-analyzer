@@ -8,19 +8,17 @@ from signals import Signal
 def intraday_chart(df, symbol: str, signal: Signal | None = None,
                    or_high: float | None = None, or_low: float | None = None,
                    window_label: str = "",
-                   pivots: dict | None = None,
-                   pa_levels: dict | None = None) -> go.Figure:
+                   pivots: dict | None = None) -> go.Figure:
     """Intraday candles + close line, EMA 9/21, VWAP, opening-range lines,
-    standard pivot lines (P/R1/S1 from the prior day), prior-day price-action
-    levels (PDH/PDC/PDL), volume, MACD, RSI, ADX with +DI/-DI, stochastic."""
+    standard pivot lines (P/R1/S1 from the prior day),
+    volume, MACD, RSI, ADX with +DI/-DI."""
     import math
     title = f"{symbol} — {window_label}" if window_label else f"{symbol} intraday"
     fig = make_subplots(
-        rows=6, cols=1, shared_xaxes=True,
-        row_heights=[0.44, 0.09, 0.115, 0.115, 0.13, 0.11],
-        vertical_spacing=0.05,
+        rows=5, cols=1, shared_xaxes=True,
+        row_heights=[0.46, 0.10, 0.135, 0.135, 0.17], vertical_spacing=0.05,
         subplot_titles=(title, "Volume", "MACD", "RSI (momentum)",
-                        "ADX / DI (trend strength)", "Stochastic (momentum shift)"),
+                        "ADX / DI (trend strength)"),
     )
 
     # Candles are translucent so the EMA lines read through them: on a dense
@@ -76,21 +74,6 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
                               annotation_text=f"{label} {v:,.2f}",
                               annotation_position="bottom right")
 
-    # Price-action levels from the prior day (the book's AHPMB levels):
-    # prior-day high / close / low, dark-amber dashed. Always drawn — these
-    # three are primary levels the trader asked to see (unlike the pivots
-    # above, which keep the 2.5% proximity rule as secondary references).
-    if pa_levels and not df.empty:
-        for key, label, pos in (("PDH", "PDH", "top right"),
-                                ("PDC", "PDC", "bottom right"),
-                                ("PDL", "PDL", "bottom right")):
-            v = pa_levels.get(key)
-            if v is not None and math.isfinite(v):
-                fig.add_hline(y=v, line_dash="dash", line_color="#b45309",
-                              line_width=1.5, row=1, col=1,
-                              annotation_text=f"{label} {v:,.2f}",
-                              annotation_position=pos)
-
     # Entry / exit levels from the signal
     if signal and signal.action in ("BUY", "SELL"):
         levels = [("Entry", signal.entry, "#6b7280"),
@@ -138,24 +121,13 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
                       annotation_text="Trend threshold 25",
                       annotation_position="top left")
 
-    if "StochK" in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df["StochK"], name="%K",
-                                 line=dict(width=1.5, color="#2563eb")), row=6, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["StochD"], name="%D",
-                                 line=dict(width=1.2, color="#f97316")), row=6, col=1)
-        fig.add_hline(y=80, line_dash="dot", line_color="#9ca3af", row=6, col=1,
-                      annotation_text="Overbought 80", annotation_position="top left")
-        fig.add_hline(y=20, line_dash="dot", line_color="#9ca3af", row=6, col=1,
-                      annotation_text="Oversold 20", annotation_position="bottom left")
-
     fig.update_layout(
-        height=800, margin=dict(l=10, r=10, t=40, b=10),
+        height=740, margin=dict(l=10, r=10, t=40, b=10),
         xaxis_rangeslider_visible=False, hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0),
     )
     fig.update_yaxes(range=[0, 100], row=4, col=1)
     fig.update_yaxes(range=[0, 100], row=5, col=1)
-    fig.update_yaxes(range=[0, 100], row=6, col=1)
     fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])  # hide weekend gaps
     return fig
 
