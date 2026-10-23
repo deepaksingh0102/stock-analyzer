@@ -86,18 +86,29 @@ def _alpaca_feed() -> str:
 
 
 def fetch_alpaca_bars(symbol: str, timeframe: str = "5Min",
-                      days: int = 7, limit: int = 1000, feed: str | None = None) -> pd.DataFrame:
+                      days: int = 7, limit: int = 1000, feed: str | None = None,
+                      end_iso: str | None = None) -> pd.DataFrame:
     """Bars from Alpaca (data.alpaca.markets) — the HTML's data source.
 
     Mirrors the HTML's fetchCandles: timeframe/start/end/limit/feed params,
     APCA-API-KEY-ID / APCA-API-SECRET-KEY headers.
+
+    `end_iso` (an aware ISO timestamp) anchors the window to a past
+    session for the analyzer's replay / date view; the default keeps the
+    live behavior (window ending now).
     """
     import config
     import requests
     from datetime import datetime, timedelta, timezone
 
     feed = feed or _alpaca_feed()
-    end = datetime.now(timezone.utc)
+    if end_iso:
+        end = pd.Timestamp(end_iso)
+        if end.tzinfo is None:
+            end = end.tz_localize("UTC")
+        end = end.to_pydatetime()
+    else:
+        end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
     # sort=desc: Alpaca pages FORWARD from `start`, so with the default
     # ascending order a `limit` smaller than the window returns the OLDEST
@@ -227,7 +238,8 @@ def fetch_prices(symbol: str) -> pd.DataFrame:
     return _clean_ohlc(df)
 
 
-def fetch_intraday(symbol: str, period: str = INTRADAY_PERIOD) -> pd.DataFrame:
+def fetch_intraday(symbol: str, period: str = INTRADAY_PERIOD,
+                   end_iso: str | None = None) -> pd.DataFrame:
     """1-minute bars, regular session only (9:30–16:00 ET).
 
     Alpaca when keys are set, else Yahoo. The chart plots these directly,
@@ -240,17 +252,39 @@ def fetch_intraday(symbol: str, period: str = INTRADAY_PERIOD) -> pd.DataFrame:
 
     (No separate 1-minute fetch: this feed IS the 1-minute feed, so the
     order-pressure check reads it directly instead of fetching it twice.)
+
+    `end_iso` replays a past session: the ~3-session window ends at that
+    timestamp instead of now. Yahoo keeps only ~30 days of 1-minute
+    bars, so the Yahoo path can only replay recent sessions.
     """
+    # end_iso is an exclusive end instant (the app passes midnight ET at
+    # the start of the day AFTER the target session).
+    end_naive = (pd.Timestamp(end_iso).tz_convert("America/New_York")
+                 .tz_localize(None) if end_iso else None)
+    end_d = ((end_naive - pd.Timedelta(minutes=1)).date()
+             if end_naive is not None else None)
     if alpaca_is_configured():
-        df = fetch_alpaca_bars(symbol, timeframe="1Min", days=3, limit=10000)
+        df = fetch_alpaca_bars(symbol, timeframe="1Min", days=3, limit=10000,
+                               end_iso=end_iso)
     else:
         import yfinance as yf
 
-        df = yf.Ticker(symbol).history(period=period, interval="1m", auto_adjust=True,
-                                       prepost=False)
+        if end_iso:
+            df = yf.Ticker(symbol).history(
+                start=(end_d - pd.Timedelta(days=6)).isoformat(),
+                end=(end_d + pd.Timedelta(days=1)).isoformat(),
+                interval="1m", auto_adjust=True, prepost=False)
+        else:
+            df = yf.Ticker(symbol).history(period=period, interval="1m",
+                                           auto_adjust=True, prepost=False)
         if df is None or df.empty:
             raise ValueError(f"No intraday data found for '{symbol}'.")
         df = _clean_ohlc(df)
+    if end_naive is not None:
+        # Enforce the replay contract exactly: no bars at or after the
+        # end instant (Yahoo's end date is inclusive of the following
+        # day, so its raw reply overshoots by one session).
+        df = df[df.index < end_naive]
     df = regular_session_only(df)
     # When this fetch completed — lets the app distinguish "the feed served
     # stale bars" from "the app hasn't refetched". Survives the cache
