@@ -5,7 +5,7 @@ Wraps the analyzer engine in data.py (ported from single-stock-analyzer.html):
 hard-gate verdict, confirmation scorecard, Direction Radar, pressure checks,
 45-minute direction forecast, and mechanical trade planning.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import time
 
@@ -65,6 +65,21 @@ def load_intraday(symbol: str, use_demo: bool, bucket: int = 0) -> pd.DataFrame:
     reads the same 1-minute bars — what you see is what the verdict uses.
     No separate loader — this feed IS the 1-minute feed."""
     return data.demo_intraday(symbol) if use_demo else data.fetch_intraday(symbol)
+
+
+@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
+def load_intraday_replay(symbol: str, use_demo: bool, end_iso: str) -> pd.DataFrame:
+    """1-minute bars for the ~3 sessions ending at a past session (the
+    replay / date view). Demo mode truncates the synthetic feed at the
+    same end so offline testing exercises the same path."""
+    if use_demo:
+        df = data.demo_intraday(symbol)
+        if len(df):
+            end_et = pd.Timestamp(end_iso).tz_convert(
+                "America/New_York").tz_localize(None)
+            df = df[df.index <= end_et]
+        return df
+    return data.fetch_intraday(symbol, end_iso=end_iso)
 
 
 @st.cache_data(ttl=600, max_entries=32, show_spinner=False)
@@ -187,6 +202,19 @@ with st.sidebar:
                             help="How much recent history the chart shows. Candles are "
                                  "always 1-minute. The Direction Radar, signal, and forecast "
                                  "read the same 1-minute bars as the chart.")
+    _today_et = datetime.now(ET).date()
+    view_date = st.date_input(
+        "Session date (Chart & Signal tab)", value=_today_et,
+        max_value=_today_et, min_value=_today_et - timedelta(days=365),
+        help="Pick a past trading day to replay that session on the "
+             "Chart & Signal tab: the chart, verdict, radar and "
+             "forecast are computed as of that session's close, from "
+             "that session's bars alone. The live quote, tape checks "
+             "and auto-refresh pause in replay; Top Movers and "
+             "Watchlist stay live. Alpaca replays go back years; a "
+             "Yahoo-only setup can only replay about the last 30 days "
+             "of 1-minute bars.")
+    past_mode = bool(view_date) and view_date < _today_et
     use_demo = st.toggle("Demo data (offline / no internet)", value=False)
 
     if signals.alpaca_is_configured():
@@ -216,9 +244,10 @@ CHART_TF_TRAILING = {"5 minutes": 5, "15 minutes": 15, "1 hour": 60,
 # ---------------------------------------------------------------------------
 # Tab 1: one symbol in detail
 # ---------------------------------------------------------------------------
-@st.fragment(run_every=refresh_secs if live else None)
+@st.fragment(run_every=refresh_secs if (live and not past_mode) else None)
 def detail_view(use_demo: bool,
-                live: bool, refresh_secs: int, chart_tf: str = "Since market open"):
+                live: bool, refresh_secs: int, chart_tf: str = "Since market open",
+                view_date=None, past_mode: bool = False):
     # The symbol lives in session state, not in the fragment's arguments: with
     # run_every active, the fragment's refresh timer re-invokes it with the
     # arguments captured at its first invocation, so a newly typed symbol
@@ -227,7 +256,11 @@ def detail_view(use_demo: bool,
     if not symbol:
         st.info("Type a stock symbol in the sidebar to begin.")
         return
-    if live:
+    if past_mode:
+        st.caption(f"📅 Replay — viewing the {view_date} session as of "
+                   "its close. Live quote, tape checks and auto-refresh "
+                   "are paused; Top Movers and Watchlist stay live.")
+    elif live:
         st.caption(f"🟢 Live tracking on — refreshing every {refresh_secs}s · "
                    f"last updated {_now_et().strftime('%H:%M:%S')} ET · "
                    "auto-refresh pauses while this tab is in the background")
@@ -246,16 +279,44 @@ def detail_view(use_demo: bool,
             # candle every minute). The engine reads the same 1-minute bars,
             # so the RSI/MACD/EMA values behind the verdict are exactly the
             # ones plotted on the chart.
-            df_1m = load_intraday(symbol, use_demo, bucket_mid)
-            bench_1m = (load_intraday(bench, use_demo, bucket_mid)
-                        if bench != symbol else None)
-            bench2_1m = (load_intraday(bench2, use_demo, bucket_mid)
-                         if bench2 else None)
-            quote, quote_note = load_quote(symbol, use_demo, bucket)
-            trades = load_trades(symbol, use_demo, bucket)
+            if past_mode:
+                # Replay: the intraday window ends at the picked session
+                # and the daily frame is truncated at it (its indicators
+                # are trailing-only, so truncating after computing them
+                # leaks nothing from later days). No live quote or tape
+                # exists for a past session — the engine's no-quote path
+                # is the same one demo mode uses.
+                end_iso = (datetime(view_date.year, view_date.month,
+                                    view_date.day, tzinfo=ET)
+                           + timedelta(days=1)).astimezone(
+                               ZoneInfo("UTC")).isoformat()
+                df_daily = df_daily[df_daily.index.date <= view_date]
+                df_1m = load_intraday_replay(symbol, use_demo, end_iso)
+                bench_1m = (load_intraday_replay(bench, use_demo, end_iso)
+                            if bench != symbol else None)
+                bench2_1m = (load_intraday_replay(bench2, use_demo, end_iso)
+                             if bench2 else None)
+                quote, quote_note = None, ""
+                trades = None
+            else:
+                df_1m = load_intraday(symbol, use_demo, bucket_mid)
+                bench_1m = (load_intraday(bench, use_demo, bucket_mid)
+                            if bench != symbol else None)
+                bench2_1m = (load_intraday(bench2, use_demo, bucket_mid)
+                             if bench2 else None)
+                quote, quote_note = load_quote(symbol, use_demo, bucket)
+                trades = load_trades(symbol, use_demo, bucket)
     except Exception as exc:
         st.error(f"Could not load **{symbol}**: {exc}")
         st.caption("Tip: turn on **Demo data** in the sidebar to test without internet.")
+        return
+    if past_mode and (not len(df_1m) or not len(df_daily)
+                      or df_1m.index[-1].date() != view_date):
+        st.info(f"No 1-minute session data for **{symbol}** on "
+                f"{view_date} — the market was closed that day, the "
+                "symbol did not trade, or the date is beyond your data "
+                "feed's 1-minute history (Yahoo keeps ~30 days; Alpaca "
+                "goes back years). Pick a recent trading day.")
         return
 
     res = data.analyze_symbol(
@@ -291,7 +352,7 @@ def detail_view(use_demo: bool,
         hist.extend(seed_pts)
         hist.sort(key=lambda p: p[0])
         st.session_state[f"{hist_key}_seeded"] = True
-    if res["radar"]:
+    if res["radar"] and not past_mode:
         now = _now_et()
         if not hist or (now - hist[-1][0]).total_seconds() >= 30:
             hist.append((now, res["radar"]["score"]))
@@ -314,7 +375,8 @@ def detail_view(use_demo: bool,
     # In the first minutes after the open the latest completed bar is still
     # yesterday's 15:59 — the feed isn't delayed, it's just warming up. Only
     # judge freshness once the session is underway.
-    session_warm = in_session and (now_et.hour, now_et.minute) >= (9, 35)
+    session_warm = (in_session and not past_mode
+                    and (now_et.hour, now_et.minute) >= (9, 35))
     stale_parts = []
 
     def _et(ts):
@@ -363,7 +425,11 @@ def detail_view(use_demo: bool,
     # replaces the alarm so last-session data isn't misread as broken.
     # When live tracking is off, stale-looking data just means no refresh —
     # say so instead of blaming the feed.
-    if data_delayed:
+    if past_mode:
+        st.caption(f"📅 Replay data — the {view_date} session as of its "
+                   "close. The verdict below is computed from that "
+                   "session's bars alone.")
+    elif data_delayed:
         st.warning("**Market data is delayed** — " + "; ".join(stale_parts) +
                    ". Price, chart and verdict may not reflect the current market. "
                    "If this persists during market hours, check your Alpaca "
@@ -721,7 +787,8 @@ def detail_view(use_demo: bool,
     src = "demo data" if use_demo else \
         ("Alpaca" if data.alpaca_is_configured() else "Yahoo Finance")
     st.caption(f"Data as of {df_1m.index[-1]} · source: {src}"
-               + (" · live tracking on" if live else ""))
+               + (f" · replay of {view_date}" if past_mode
+                  else (" · live tracking on" if live else "")))
 
 
 # ---------------------------------------------------------------------------
@@ -778,7 +845,7 @@ def watchlist_view(watchlist_text: str, use_demo: bool,
 
 
 with tab_detail:
-    detail_view(use_demo, live, refresh_secs, chart_tf)
+    detail_view(use_demo, live, refresh_secs, chart_tf, view_date, past_mode)
 with tab_movers:
     movers_view(use_demo, live, refresh_secs)
 with tab_watch:
