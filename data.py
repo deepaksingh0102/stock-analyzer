@@ -2567,8 +2567,8 @@ ZERO_DTE_NAMES = {"SPY": "S&P 500 ETF", "QQQ": "Nasdaq-100 ETF",
 
 
 def zero_dte_board() -> dict:
-    """Top 0DTE contracts by today's volume: market-wide top 5 calls and
-    top 5 puts, plus per-symbol top 5s for drill-down. One Alpaca options
+    """Top 0DTE contracts by today's volume: market-wide top 10 calls and
+    top 10 puts, plus per-symbol top 10s for drill-down. One Alpaca options
     snapshots call per symbol, expiry window = today only, OPRA feed
     first then the indicative feed. Returns {"calls": [...], "puts": [...],
     "by_symbol": {sym: {"calls": [...], "puts": [...]}}, "source": ...,
@@ -2638,7 +2638,7 @@ def zero_dte_board() -> dict:
         sym_calls.sort(key=lambda r: r["Volume"], reverse=True)
         sym_puts.sort(key=lambda r: r["Volume"], reverse=True)
         if sym_calls or sym_puts:
-            by_symbol[sym] = {"calls": sym_calls[:5], "puts": sym_puts[:5]}
+            by_symbol[sym] = {"calls": sym_calls[:10], "puts": sym_puts[:10]}
             calls.extend(sym_calls)
             puts.extend(sym_puts)
     if not calls and not puts:
@@ -2648,6 +2648,6 @@ def zero_dte_board() -> dict:
     calls.sort(key=lambda r: r["Volume"], reverse=True)
     puts.sort(key=lambda r: r["Volume"], reverse=True)
     feed_label = feeds.pop() if len(feeds) == 1 else "mixed feeds"
-    return {"calls": calls[:5], "puts": puts[:5], "by_symbol": by_symbol,
+    return {"calls": calls[:10], "puts": puts[:10], "by_symbol": by_symbol,
             "source": f"Alpaca ({feed_label})",
             "asof": datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M")}

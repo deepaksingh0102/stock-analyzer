@@ -897,7 +897,7 @@ def zero_dte_view(use_demo: bool, live: bool, refresh_secs: int):
     scope = st.selectbox("Underlying",
                          ["All underlyings"] + list(data.ZERO_DTE_UNIVERSE),
                          help="All underlyings ranks every 0DTE contract by volume; "
-                              "pick one to see only its top 5 calls and puts.")
+                              "pick one to see only its top 10 calls and puts.")
     if scope == "All underlyings":
         calls, puts = b["calls"], b["puts"]
     else:
@@ -910,10 +910,10 @@ def zero_dte_view(use_demo: bool, live: bool, refresh_secs: int):
         except Exception:
             return None
 
-    st.markdown("**Top 5 0DTE Calls by volume**")
+    st.markdown("**Top 10 0DTE Calls by volume**")
     st.dataframe(_0dte_table(calls, _price), hide_index=True,
                  use_container_width=True)
-    st.markdown("**Top 5 0DTE Puts by volume**")
+    st.markdown("**Top 10 0DTE Puts by volume**")
     st.dataframe(_0dte_table(puts, _price), hide_index=True,
                  use_container_width=True)
     st.caption(f"As of {b['asof']} ET · source: {b['source']} · contracts expiring "
