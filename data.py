@@ -2553,3 +2553,101 @@ def options_volume_ranking() -> dict:
     feed_label = feeds.pop() if len(feeds) == 1 else "mixed feeds"
     return {"rows": rows, "source": f"Alpaca ({feed_label})",
             "asof": datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M")}
+
+
+# ---------------------------------------------------------------------------
+# 0DTE board (Stock Analyzer "0DTE Board" tab)
+# ---------------------------------------------------------------------------
+# SPY/QQQ are included even though the analyzer is otherwise stocks-only:
+# 0DTE trading lives on the index ETFs, and single-stock 0DTE chains
+# mostly exist on Fridays (weekly expiry).
+ZERO_DTE_UNIVERSE = ["SPY", "QQQ"] + OPTIONS_UNIVERSE
+ZERO_DTE_NAMES = {"SPY": "S&P 500 ETF", "QQQ": "Nasdaq-100 ETF",
+                  **OPTIONS_NAMES}
+
+
+def zero_dte_board() -> dict:
+    """Top 0DTE contracts by today's volume: market-wide top 5 calls and
+    top 5 puts, plus per-symbol top 5s for drill-down. One Alpaca options
+    snapshots call per symbol, expiry window = today only, OPRA feed
+    first then the indicative feed. Returns {"calls": [...], "puts": [...],
+    "by_symbol": {sym: {"calls": [...], "puts": [...]}}, "source": ...,
+    "asof": ...} or {"error": ...}."""
+    import re
+    import requests
+    from datetime import datetime
+
+    if not alpaca_is_configured():
+        return {"error": "Alpaca options data is not configured "
+                          "(keys live in Streamlit Secrets)."}
+    headers = _alpaca_headers()
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    occ = re.compile(r"^[A-Z]+(\d{6})([CP])(\d{8})$")
+    calls, puts = [], []
+    by_symbol = {}
+    feeds = set()
+    for sym in ZERO_DTE_UNIVERSE:
+        sym_calls, sym_puts = [], []
+        for feed in ("opra", "indicative"):
+            try:
+                token, pages = None, 0
+                found = False
+                while pages < 20:
+                    params = {"feed": feed, "limit": 1000,
+                              "expiration_date_gte": today.isoformat(),
+                              "expiration_date_lte": today.isoformat()}
+                    if token:
+                        params["page_token"] = token
+                    r = requests.get(
+                        "https://data.alpaca.markets/v1beta1/options"
+                        f"/snapshots/{sym}", params=params, headers=headers,
+                        timeout=30)
+                    if r.status_code in (401, 403):
+                        break  # not entitled to this feed — try the next one
+                    r.raise_for_status()
+                    payload = r.json()
+                    for csym, snap in (payload.get("snapshots") or {}).items():
+                        m = occ.match(csym)
+                        if not m:
+                            continue
+                        vol = float((snap.get("dailyBar") or {}).get("v") or 0)
+                        if vol <= 0:
+                            continue
+                        row = {"Underlying": sym,
+                               "Strike": int(m.group(3)) / 1000,
+                               "Last": (snap.get("latestTrade") or {}).get("p")
+                                       or (snap.get("dailyBar") or {}).get("c"),
+                               "Volume": int(vol),
+                               "OI": int(snap.get("openInterest") or 0),
+                               "Bid": (snap.get("latestQuote") or {}).get("bp"),
+                               "Ask": (snap.get("latestQuote") or {}).get("ap"),
+                               "Delta": (snap.get("greeks") or {}).get("delta"),
+                               "IV": snap.get("impliedVolatility")}
+                        (sym_puts if m.group(2) == "P"
+                         else sym_calls).append(row)
+                        found = True
+                    token = payload.get("next_page_token")
+                    pages += 1
+                    if not token:
+                        break
+                if found:
+                    feeds.add(feed)
+                    break
+            except Exception:
+                continue
+        sym_calls.sort(key=lambda r: r["Volume"], reverse=True)
+        sym_puts.sort(key=lambda r: r["Volume"], reverse=True)
+        if sym_calls or sym_puts:
+            by_symbol[sym] = {"calls": sym_calls[:5], "puts": sym_puts[:5]}
+            calls.extend(sym_calls)
+            puts.extend(sym_puts)
+    if not calls and not puts:
+        return {"error": "No 0DTE contracts with volume found for today — "
+                          "single-stock 0DTE chains mostly exist on Fridays; "
+                          "SPY/QQQ list every trading day."}
+    calls.sort(key=lambda r: r["Volume"], reverse=True)
+    puts.sort(key=lambda r: r["Volume"], reverse=True)
+    feed_label = feeds.pop() if len(feeds) == 1 else "mixed feeds"
+    return {"calls": calls[:5], "puts": puts[:5], "by_symbol": by_symbol,
+            "source": f"Alpaca ({feed_label})",
+            "asof": datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M")}

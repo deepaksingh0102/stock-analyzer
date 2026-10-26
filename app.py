@@ -124,6 +124,18 @@ def load_options_ranking(use_demo: bool, bucket: int = 0):
         return {"error": str(exc)[:200]}
 
 
+@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
+def load_0dte_board(use_demo: bool, bucket: int = 0):
+    """0DTE board. {"error": msg} on failure."""
+    if use_demo:
+        return {"error": "Demo mode is offline — the 0DTE board needs "
+                          "live Alpaca options data."}
+    try:
+        return data.zero_dte_board()
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
 def _style_movers(df: pd.DataFrame):
     """Format movers table: $ price, ±% change, green/red change values."""
     sty = df.style.format({"Price": "${:,.2f}", "Change %": "{:+.2f}%"})
@@ -220,7 +232,7 @@ with st.sidebar:
              "forecast are computed as of that session's close, from "
              "that session's bars alone. The live quote, tape checks "
              "and auto-refresh pause in replay; Top Movers and "
-             "Top Options Volume stay live. Alpaca replays go back years; a "
+             "Top Options Volume and 0DTE Board stay live. Alpaca replays go back years; a "
              "Yahoo-only setup can only replay about the last 30 days "
              "of 1-minute bars.")
     past_mode = bool(view_date) and view_date < _today_et
@@ -234,7 +246,8 @@ with st.sidebar:
 
 
 st.title("📈 Stock Analyzer")
-tab_detail, tab_movers, tab_opts = st.tabs(["Chart & Signal", "Top Movers", "Top Options Volume"])
+tab_detail, tab_movers, tab_opts, tab_0dte = st.tabs(
+    ["Chart & Signal", "Top Movers", "Top Options Volume", "0DTE Board"])
 
 
 def _thresholds():
@@ -268,7 +281,7 @@ def detail_view(use_demo: bool,
     if past_mode:
         st.caption(f"📅 Replay — viewing the {view_date} session as of "
                    "its close. Live quote, tape checks and auto-refresh "
-                   "are paused; Top Movers and Top Options Volume stay live.")
+                   "are paused; Top Movers, Top Options Volume and 0DTE Board stay live.")
     elif live:
         st.caption(f"🟢 Live tracking on — refreshing every {refresh_secs}s · "
                    f"last updated {_now_et().strftime('%H:%M:%S')} ET · "
@@ -857,9 +870,63 @@ def options_volume_view(use_demo: bool, live: bool, refresh_secs: int):
     st.caption("Tip: type any of these symbols in the sidebar search to see its chart.")
 
 
+def _0dte_table(rows, price_fn):
+    out = []
+    for r in rows:
+        out.append({"Underlying": r["Underlying"], "Strike": r["Strike"],
+                    "Underlying price": price_fn(r["Underlying"]),
+                    "Last": r["Last"], "Volume": r["Volume"], "OI": r["OI"],
+                    "Bid": r["Bid"], "Ask": r["Ask"],
+                    "Delta": (round(r["Delta"], 2)
+                              if r["Delta"] is not None else None),
+                    "IV": (round(r["IV"], 2) if r["IV"] is not None else None)})
+    return pd.DataFrame(out)
+
+
+@st.fragment(run_every=refresh_secs if live else None)
+def zero_dte_view(use_demo: bool, live: bool, refresh_secs: int):
+    st.subheader("0DTE Board — expires today")
+    # Same 5-min bucket as the other slow tabs: one snapshots call per symbol.
+    bucket = _bucket(live, refresh_secs, bucket_secs=300)
+    with st.spinner("Scanning today's expiry chains…"):
+        b = load_0dte_board(use_demo, bucket)
+    if b.get("error"):
+        st.error(f"Could not load 0DTE board: {b['error']}")
+        st.caption("This tab needs Alpaca options data (keys in Streamlit Secrets).")
+        return
+    scope = st.selectbox("Underlying",
+                         ["All underlyings"] + list(data.ZERO_DTE_UNIVERSE),
+                         help="All underlyings ranks every 0DTE contract by volume; "
+                              "pick one to see only its top 5 calls and puts.")
+    if scope == "All underlyings":
+        calls, puts = b["calls"], b["puts"]
+    else:
+        entry = b["by_symbol"].get(scope, {"calls": [], "puts": []})
+        calls, puts = entry["calls"], entry["puts"]
+
+    def _price(sym):
+        try:
+            return round(data.summary(load_daily(sym, use_demo, bucket))["price"], 2)
+        except Exception:
+            return None
+
+    st.markdown("**Top 5 0DTE Calls by volume**")
+    st.dataframe(_0dte_table(calls, _price), hide_index=True,
+                 use_container_width=True)
+    st.markdown("**Top 5 0DTE Puts by volume**")
+    st.dataframe(_0dte_table(puts, _price), hide_index=True,
+                 use_container_width=True)
+    st.caption(f"As of {b['asof']} ET · source: {b['source']} · contracts expiring "
+               "today only, ranked by today's traded volume. SPY/QQQ are included "
+               "because 0DTE trading lives there; single-stock 0DTE chains mostly "
+               "exist on Fridays (weekly expiry).")
+
+
 with tab_detail:
     detail_view(use_demo, live, refresh_secs, chart_tf, view_date, past_mode)
 with tab_movers:
     movers_view(use_demo, live, refresh_secs)
 with tab_opts:
     options_volume_view(use_demo, live, refresh_secs)
+with tab_0dte:
+    zero_dte_view(use_demo, live, refresh_secs)
