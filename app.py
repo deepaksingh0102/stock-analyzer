@@ -112,6 +112,18 @@ def load_sp500_movers(use_demo: bool, bucket: int = 0):
         return {"error": str(exc)[:200]}
 
 
+@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
+def load_options_ranking(use_demo: bool, bucket: int = 0):
+    """Top-20 options-volume ranking. {"error": msg} on failure."""
+    if use_demo:
+        return {"error": "Demo mode is offline — the options ranking needs "
+                          "live Alpaca options data."}
+    try:
+        return data.options_volume_ranking()
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
 def _style_movers(df: pd.DataFrame):
     """Format movers table: $ price, ±% change, green/red change values."""
     sty = df.style.format({"Price": "${:,.2f}", "Change %": "{:+.2f}%"})
@@ -178,9 +190,6 @@ with st.sidebar:
     risk_pct = st.number_input("Risk per trade %", value=float(config.RISK_PCT),
                                step=0.25, format="%.2f")
 
-    st.header("Watchlist")
-    watchlist_text = st.text_area("Symbols (comma separated)", value=config.DEFAULT_WATCHLIST)
-
     st.header("Settings")
     live = st.toggle("Live tracking (auto-refresh)", value=True,
                      help="When on, the analysis re-runs automatically at the interval below.")
@@ -211,7 +220,7 @@ with st.sidebar:
              "forecast are computed as of that session's close, from "
              "that session's bars alone. The live quote, tape checks "
              "and auto-refresh pause in replay; Top Movers and "
-             "Watchlist stay live. Alpaca replays go back years; a "
+             "Top Options Volume stay live. Alpaca replays go back years; a "
              "Yahoo-only setup can only replay about the last 30 days "
              "of 1-minute bars.")
     past_mode = bool(view_date) and view_date < _today_et
@@ -225,7 +234,7 @@ with st.sidebar:
 
 
 st.title("📈 Stock Analyzer")
-tab_detail, tab_movers, tab_watch = st.tabs(["Chart & Signal", "Top Movers", "Watchlist"])
+tab_detail, tab_movers, tab_opts = st.tabs(["Chart & Signal", "Top Movers", "Top Options Volume"])
 
 
 def _thresholds():
@@ -259,7 +268,7 @@ def detail_view(use_demo: bool,
     if past_mode:
         st.caption(f"📅 Replay — viewing the {view_date} session as of "
                    "its close. Live quote, tape checks and auto-refresh "
-                   "are paused; Top Movers and Watchlist stay live.")
+                   "are paused; Top Movers and Top Options Volume stay live.")
     elif live:
         st.caption(f"🟢 Live tracking on — refreshing every {refresh_secs}s · "
                    f"last updated {_now_et().strftime('%H:%M:%S')} ET · "
@@ -792,8 +801,6 @@ def detail_view(use_demo: bool,
 
 
 # ---------------------------------------------------------------------------
-# Tab 2: watchlist overview
-# ---------------------------------------------------------------------------
 @st.fragment(run_every=refresh_secs if live else None)
 # ---------------------------------------------------------------------------
 # Tab 2: S&P 500 top movers
@@ -817,36 +824,42 @@ def movers_view(use_demo: bool, live: bool, refresh_secs: int):
                  use_container_width=True)
 
 
-def watchlist_view(watchlist_text: str, use_demo: bool,
-                   live: bool, refresh_secs: int):
-    symbols = [x.strip().upper() for x in watchlist_text.split(",") if x.strip()]
-    if not symbols:
-        st.info("Add symbols to the watchlist in the sidebar.")
-        return
-    # Daily bars only: 5-min refresh is plenty.
+@st.fragment(run_every=refresh_secs if live else None)
+def options_volume_view(use_demo: bool, live: bool, refresh_secs: int):
+    st.subheader("Top 20 Stocks by Options Volume")
+    # A 50-symbol options scan is slow (one snapshots call per symbol),
+    # so it refreshes on the same 5-min bucket as Top Movers.
     bucket = _bucket(live, refresh_secs, bucket_secs=300)
-
+    with st.spinner("Scanning options volume… (first scan can take up to a minute)"):
+        r = load_options_ranking(use_demo, bucket)
+    if r.get("error"):
+        st.error(f"Could not load options ranking: {r['error']}")
+        st.caption("This tab needs Alpaca options data (keys in Streamlit Secrets).")
+        return
     rows = []
-    for sym in symbols:
+    for row in r["rows"][:20]:
+        sym = row["Symbol"]
         try:
             df = load_daily(sym, use_demo, bucket)
-            s, sig = data.summary(df), signals.daily_signal(df)
-            rows.append({"Symbol": sym, "Price": round(s["price"], 2),
-                         "Change %": round(s["change_pct"], 2), "Trend": s["trend"],
-                         "RSI": round(s["rsi"]), "Daily signal": sig.action,
-                         "Entry": sig.entry, "Exit / target": sig.target,
-                         "Stop loss": sig.stop_loss})
-        except Exception as exc:
-            rows.append({"Symbol": sym, "Signal": "ERROR", "Trend": str(exc)[:60]})
-
-    st.dataframe(pd.DataFrame(rows).round(2), hide_index=True, use_container_width=True)
-    st.caption("Tip: type any of these symbols in the sidebar search to see its chart. "
-               "Watchlist signals use the daily trend (lighter than the full analyzer).")
+            s = data.summary(df)
+            price, chg = round(s["price"], 2), round(s["change_pct"], 2)
+        except Exception:
+            price, chg = None, None
+        rows.append({"#": len(rows) + 1, "Symbol": sym, "Company": row["Name"],
+                     "Options volume": row["Options volume"],
+                     "Calls": row["Calls"], "Puts": row["Puts"], "P/C": row["P/C"],
+                     "Price": price, "Change %": chg})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.caption(f"As of {r['asof']} ET · source: {r['source']} · today's contracts "
+               "traded, expiries within 30 days, ranked across a 50-name liquid "
+               "universe (stocks only — SPY/QQQ/IWM excluded). A full-market scan "
+               "is too slow for the app's refresh loop.")
+    st.caption("Tip: type any of these symbols in the sidebar search to see its chart.")
 
 
 with tab_detail:
     detail_view(use_demo, live, refresh_secs, chart_tf, view_date, past_mode)
 with tab_movers:
     movers_view(use_demo, live, refresh_secs)
-with tab_watch:
-    watchlist_view(watchlist_text, use_demo, live, refresh_secs)
+with tab_opts:
+    options_volume_view(use_demo, live, refresh_secs)

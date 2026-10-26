@@ -2448,3 +2448,108 @@ def summary(df: pd.DataFrame) -> dict:
         "trend": trend_label(df),
         "as_of": df.index[-1].strftime("%Y-%m-%d"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Top options volume ranking (Stock Analyzer "Top Options Volume" tab)
+# ---------------------------------------------------------------------------
+# Ranked universe, not a full-market scan: one Alpaca options-snapshots
+# call per symbol (plus pagination), so scanning all listed stocks would
+# take minutes inside the app's refresh loop. Options volume is extremely
+# concentrated, so the true top 20 sits inside this list in practice.
+# Index ETFs (SPY/QQQ/IWM) are excluded: the analyzer is stocks-only.
+OPTIONS_UNIVERSE = [
+    "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "AMD", "AVGO", "NFLX",
+    "GOOGL", "PLTR", "MSTR", "COIN", "JPM", "BAC", "WMT", "COST", "LLY",
+    "UNH", "HD", "PG", "V", "MA", "JNJ", "CRM", "ORCL", "ADBE", "INTC",
+    "MU", "QCOM", "DIS", "UBER", "ABNB", "SHOP", "SQ", "PYPL", "HOOD",
+    "SOFI", "DKNG", "APP", "ARM", "SMCI", "XOM", "CVX", "GS", "MS", "WFC",
+    "AXP", "PANW", "CRWD",
+]
+OPTIONS_NAMES = {
+    "AAPL": "Apple", "MSFT": "Microsoft", "NVDA": "NVIDIA", "TSLA": "Tesla",
+    "AMZN": "Amazon", "META": "Meta Platforms", "AMD": "Advanced Micro Devices",
+    "AVGO": "Broadcom", "NFLX": "Netflix", "GOOGL": "Alphabet",
+    "PLTR": "Palantir", "MSTR": "Strategy", "COIN": "Coinbase",
+    "JPM": "JPMorgan Chase", "BAC": "Bank of America", "WMT": "Walmart",
+    "COST": "Costco", "LLY": "Eli Lilly", "UNH": "UnitedHealth",
+    "HD": "Home Depot", "PG": "Procter & Gamble", "V": "Visa",
+    "MA": "Mastercard", "JNJ": "Johnson & Johnson", "CRM": "Salesforce",
+    "ORCL": "Oracle", "ADBE": "Adobe", "INTC": "Intel", "MU": "Micron",
+    "QCOM": "Qualcomm", "DIS": "Disney", "UBER": "Uber", "ABNB": "Airbnb",
+    "SHOP": "Shopify", "SQ": "Block", "PYPL": "PayPal", "HOOD": "Robinhood",
+    "SOFI": "SoFi", "DKNG": "DraftKings", "APP": "AppLovin",
+    "ARM": "Arm Holdings", "SMCI": "Super Micro Computer",
+    "XOM": "Exxon Mobil", "CVX": "Chevron", "GS": "Goldman Sachs",
+    "MS": "Morgan Stanley", "WFC": "Wells Fargo", "AXP": "American Express",
+    "PANW": "Palo Alto Networks", "CRWD": "CrowdStrike",
+}
+
+
+def options_volume_ranking() -> dict:
+    """Today's total options contracts traded (puts + calls) per symbol,
+    expiries within 30 days — where most of a day's options volume sits.
+    Alpaca options snapshots, OPRA feed first then the indicative feed,
+    same pattern as the charting app's PCR fetch. Returns
+    {"rows": [...], "source": ..., "asof": ...} or {"error": ...}."""
+    import re
+    import requests
+    from datetime import datetime, timedelta
+
+    if not alpaca_is_configured():
+        return {"error": "Alpaca options data is not configured "
+                          "(keys live in Streamlit Secrets)."}
+    headers = _alpaca_headers()
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    occ = re.compile(r"^[A-Z]+\d{6}([CP])\d{8}$")
+    rows, feeds = [], set()
+    for sym in OPTIONS_UNIVERSE:
+        for feed in ("opra", "indicative"):
+            try:
+                token, pages = None, 0
+                pv = cv = 0.0
+                while pages < 20:
+                    params = {"feed": feed, "limit": 1000,
+                              "expiration_date_gte": today.isoformat(),
+                              "expiration_date_lte":
+                                  (today + timedelta(days=30)).isoformat()}
+                    if token:
+                        params["page_token"] = token
+                    r = requests.get(
+                        "https://data.alpaca.markets/v1beta1/options"
+                        f"/snapshots/{sym}", params=params, headers=headers,
+                        timeout=30)
+                    if r.status_code in (401, 403):
+                        break  # not entitled to this feed — try the next one
+                    r.raise_for_status()
+                    payload = r.json()
+                    for csym, snap in (payload.get("snapshots") or {}).items():
+                        m = occ.match(csym)
+                        if not m:
+                            continue
+                        vol = float((snap.get("dailyBar") or {}).get("v") or 0)
+                        if m.group(1) == "P":
+                            pv += vol
+                        else:
+                            cv += vol
+                    token = payload.get("next_page_token")
+                    pages += 1
+                    if not token:
+                        break
+                if cv + pv <= 0:
+                    continue  # empty chain on this feed — try the next one
+                feeds.add(feed)
+                rows.append({"Symbol": sym, "Name": OPTIONS_NAMES.get(sym, sym),
+                             "Options volume": int(cv + pv),
+                             "Calls": int(cv), "Puts": int(pv),
+                             "P/C": round(pv / cv, 2) if cv else None})
+                break
+            except Exception:
+                continue
+    if not rows:
+        return {"error": "No options volume returned — the Alpaca options "
+                          "feed may be unavailable."}
+    rows.sort(key=lambda r: r["Options volume"], reverse=True)
+    feed_label = feeds.pop() if len(feeds) == 1 else "mixed feeds"
+    return {"rows": rows, "source": f"Alpaca ({feed_label})",
+            "asof": datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M")}
