@@ -8,10 +8,12 @@ from signals import Signal
 def intraday_chart(df, symbol: str, signal: Signal | None = None,
                    or_high: float | None = None, or_low: float | None = None,
                    window_label: str = "",
-                   pivots: dict | None = None) -> go.Figure:
+                   pivots: dict | None = None,
+                   sr_levels: list | None = None) -> go.Figure:
     """Intraday candles + close line, EMA 9/21, VWAP, opening-range lines,
-    standard pivot lines (P/R1/S1 from the prior day),
-    volume, MACD, RSI, ADX with +DI/-DI."""
+    standard pivot lines (P/R1/S1 from the prior day), support/resistance
+    levels (20-day and prior-day highs/lows), volume, MACD, RSI, ADX
+    with +DI/-DI."""
     import math
     title = f"{symbol} — {window_label}" if window_label else f"{symbol} intraday"
     fig = make_subplots(
@@ -73,6 +75,26 @@ def intraday_chart(df, symbol: str, signal: Signal | None = None,
                               line_width=1.5, row=1, col=1,
                               annotation_text=f"{label} {v:,.2f}",
                               annotation_position="bottom right")
+
+    # Support / resistance levels from daily structure (20-day and
+    # prior-day highs/lows — R1/S1 are already drawn above as pivots).
+    # Same 2.5% guard as the pivots: a level far from price would
+    # stretch the y-axis and squash the candles.
+    if sr_levels and not df.empty:
+        ref = float(df["Close"].iloc[-1])
+        for lv in sr_levels:
+            v = lv.get("value")
+            if (v is not None and math.isfinite(v) and ref > 0
+                    and abs(v - ref) / ref <= 0.025):
+                is_res = lv.get("type") == "resistance"
+                fig.add_hline(
+                    y=v, line_dash="dash",
+                    line_color="#dc2626" if is_res else "#16a34a",
+                    line_width=1.5, row=1, col=1,
+                    annotation_text=f"{'R' if is_res else 'S'} "
+                                    f"{lv.get('label', '')} {v:,.2f}",
+                    annotation_position="top right" if is_res
+                                        else "bottom right")
 
     # Entry / exit levels from the signal
     if signal and signal.action in ("BUY", "SELL"):

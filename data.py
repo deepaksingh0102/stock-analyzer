@@ -40,6 +40,51 @@ NAN = float("nan")
 
 
 # ---------------------------------------------------------------------------
+# Market hours
+# ---------------------------------------------------------------------------
+ET = ZoneInfo("America/New_York")
+
+# NYSE full-day holidays (no regular session). Explicit dates rather than a
+# new dependency — the list is short and stable.
+_NYSE_HOLIDAYS = frozenset({
+    # 2026
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+    "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+    # 2027
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-04-02", "2027-05-31",
+    "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+})
+# NYSE early closes (regular session ends 1:00 PM ET): the day after
+# Thanksgiving and Christmas Eve.
+_NYSE_EARLY_CLOSE = frozenset({
+    "2026-11-27", "2026-12-24", "2027-11-26",
+})
+
+
+def us_market_open(now: datetime | None = None) -> bool:
+    """True only during the NYSE regular session.
+
+    Monday–Friday, 9:30 AM–4:00 PM ET (1:00 PM ET on early-close days),
+    excluding exchange holidays. ``now`` may be an aware datetime (any tz)
+    or a naive one, which is read as ET wall-clock — that's what app.py's
+    ``_now_et()`` returns.
+    """
+    if now is None:
+        now_et = datetime.now(ET)
+    elif now.tzinfo is None:
+        now_et = now.replace(tzinfo=ET)
+    else:
+        now_et = now.astimezone(ET)
+    if now_et.weekday() >= 5:  # Saturday / Sunday
+        return False
+    day = now_et.strftime("%Y-%m-%d")
+    if day in _NYSE_HOLIDAYS:
+        return False
+    close = (13, 0) if day in _NYSE_EARLY_CLOSE else (16, 0)
+    return (9, 30) <= (now_et.hour, now_et.minute) <= close
+
+
+# ---------------------------------------------------------------------------
 # Fetching
 # ---------------------------------------------------------------------------
 def _clean_ohlc(df: pd.DataFrame) -> pd.DataFrame:
@@ -167,28 +212,6 @@ def fetch_alpaca_bars_multi(tickers: list, timeframe: str = "1D",
                 df.index = df.index.tz_convert("America/New_York").tz_localize(None)
             out[sym] = df[["Open", "High", "Low", "Close", "Volume"]]
     return out
-
-
-def _daily_closes_many(tickers: list) -> tuple:
-    """Daily closes for many tickers: Alpaca multi-symbol when keys are set,
-    otherwise one batched Yahoo Finance call.
-
-    Returns (closes DataFrame with ticker columns, source label)."""
-    if alpaca_is_configured():
-        try:
-            frames = [df["Close"].rename(sym)
-                      for sym, df in fetch_alpaca_bars_multi(tickers).items()]
-            if frames:
-                return pd.concat(frames, axis=1), "Alpaca"
-        except Exception:
-            pass  # fall through to Yahoo
-    import yfinance as yf
-    # threads=False: yfinance's thread pool can itself fail with
-    # "can't start new thread" when the server is under memory pressure.
-    px = yf.download(tickers, period="5d", interval="1d", auto_adjust=True,
-                     progress=False, threads=False)
-    closes = px["Close"] if isinstance(px.columns, pd.MultiIndex) else px[["Close"]]
-    return closes, "Yahoo Finance"
 
 
 def fetch_alpaca_quote(symbol: str, feed: str | None = None) -> dict | None:
@@ -444,15 +467,16 @@ def opening_range(df_1m: pd.DataFrame, minutes: int = 30) -> dict | None:
             "minutes": minutes}
 
 
-def prior_day_pivots(df_daily: pd.DataFrame) -> dict | None:
+def prior_day_pivots(df_daily: pd.DataFrame, asof_date=None) -> dict | None:
     """Standard floor pivots from the prior COMPLETED daily bar.
 
-    P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H. Skips today's still-forming bar,
-    so the levels are fixed before the open (no intraday lookahead).
+    P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H. Skips bars on/after `asof_date`
+    (today live, the replayed session in date view), so the levels are
+    fixed before the open (no intraday lookahead).
     """
     if df_daily is None or df_daily.empty:
         return None
-    today = datetime.now(ZoneInfo("America/New_York")).date()
+    today = asof_date or datetime.now(ZoneInfo("America/New_York")).date()
     dates = df_daily.index.date
     prior = df_daily[dates < today]
     bar = prior.iloc[-1] if not prior.empty else None
@@ -463,6 +487,67 @@ def prior_day_pivots(df_daily: pd.DataFrame) -> dict | None:
         return None
     p = (h + l + c) / 3.0
     return {"P": p, "R1": 2 * p - l, "S1": 2 * p - h}
+
+
+def support_resistance(df_daily: pd.DataFrame, entry: float,
+                       asof_date=None, lookback: int = 20) -> dict | None:
+    """Daily-structure support / resistance from COMPLETED daily bars only.
+
+    Bars on/after `asof_date` (today live, the replayed session in date
+    view) are excluded, so the levels are fixed before the open — no
+    lookahead from today's still-forming bar.
+
+    Resistances: 20-day high, prior-day high, pivot R1.
+    Supports: 20-day low, prior-day low, pivot S1.
+    Each side is sorted nearest-first. Levels within 0.1% of each other
+    are merged (keeps the first-listed label). Returns None when fewer
+    than 2 completed bars exist. Reference levels, not a prediction —
+    a level that breaks becomes the other side.
+    """
+    if df_daily is None or df_daily.empty or entry is None \
+            or not math.isfinite(entry) or entry <= 0:
+        return None
+    asof = asof_date or datetime.now(ZoneInfo("America/New_York")).date()
+    completed = df_daily[df_daily.index.date < asof]
+    if len(completed) < 2:
+        return None
+    window = completed.tail(lookback)
+    prior = completed.iloc[-1]
+    h, l, c = (float(prior["High"]), float(prior["Low"]),
+               float(prior["Close"]))
+    if not all(math.isfinite(x) for x in (h, l, c)) or h <= 0 or l <= 0:
+        return None
+    p = (h + l + c) / 3.0
+
+    def _levels(cands):
+        out = []
+        for label, value in cands:
+            if value is None or not math.isfinite(value) or value <= 0:
+                continue
+            if any(abs(value - o["value"]) / entry <= 0.001 for o in out):
+                continue  # near-duplicate of a level already listed
+            out.append({"label": label, "value": float(value),
+                        "distance_pct": (value / entry - 1) * 100})
+        return out
+
+    resistances = _levels([
+        ("20-day high", float(window["High"].max())),
+        ("Prior day high", h),
+        ("Pivot R1", 2 * p - l),
+    ])
+    supports = _levels([
+        ("20-day low", float(window["Low"].min())),
+        ("Prior day low", l),
+        ("Pivot S1", 2 * p - h),
+    ])
+    resistances.sort(key=lambda r: r["value"])          # nearest above first
+    supports.sort(key=lambda s: s["value"], reverse=True)  # nearest below first
+    up = [r for r in resistances if r["value"] > entry]
+    dn = [s for s in supports if s["value"] < entry]
+    return {"resistances": resistances, "supports": supports,
+            "nearest_resistance": up[0] if up else None,
+            "nearest_support": dn[0] if dn else None,
+            "asof": completed.index[-1].date().isoformat()}
 
 
 def intraday_frame(df_1m: pd.DataFrame, window: str,
@@ -573,81 +658,6 @@ def plain_takeaway(price, ema9, ema21, vwap, rsi,
     if not parts:
         return "Not enough data for a chart read right now."
     return "Chart read: " + "; ".join(parts) + "."
-
-
-SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-
-
-def sp500_constituents() -> pd.DataFrame:
-    """S&P 500 constituents: Symbol (Yahoo format), Name. Source: Wikipedia.
-
-    Needs lxml for pd.read_html (listed in requirements.txt).
-    """
-    import requests
-    from io import StringIO
-    resp = requests.get(SP500_WIKI_URL, headers={"User-Agent": "Mozilla/5.0"},
-                        timeout=25)
-    resp.raise_for_status()
-    tables = pd.read_html(StringIO(resp.text))
-    df = tables[0]
-    df.columns = [str(c).strip() for c in df.columns]
-    sym_col = next(c for c in df.columns if "symbol" in c.lower())
-    name_col = next(c for c in df.columns if "security" in c.lower())
-    out = pd.DataFrame({
-        "Symbol": df[sym_col].astype(str).str.strip().str.replace(".", "-", regex=False),
-        "Name": df[name_col].astype(str).str.strip(),
-    })
-    return out.drop_duplicates("Symbol").reset_index(drop=True)
-
-
-def sp500_movers() -> dict:
-    """Top 10 gainers / losers of the S&P 500 by daily % change.
-
-    Membership from Wikipedia; prices from Alpaca multi-symbol bars when keys
-    are set, otherwise one batched Yahoo Finance call.
-
-    Returns {"gainers": df, "losers": df, "asof": "YYYY-MM-DD"} with
-    columns Symbol, Name, Price, Change %.
-    """
-    const = sp500_constituents()
-    tickers = const["Symbol"].tolist()
-    closes, source = _daily_closes_many(tickers)
-    if closes.empty:
-        raise ValueError("No S&P 500 price data returned.")
-    asof = pd.to_datetime(closes.index[-1]).date().isoformat()
-    name_map = dict(zip(const["Symbol"], const["Name"]))
-    rows = []
-    for t in closes.columns:
-        s = closes[t].dropna()
-        if len(s) < 2:
-            continue
-        prev, last = float(s.iloc[-2]), float(s.iloc[-1])
-        if prev <= 0:
-            continue
-        rows.append({"Symbol": t, "Name": name_map.get(t, t),
-                     "Price": last, "Change %": (last / prev - 1) * 100})
-    if not rows:
-        raise ValueError("No usable S&P 500 price data.")
-    df = pd.DataFrame(rows)
-    return {"gainers": df.nlargest(10, "Change %").reset_index(drop=True),
-            "losers": df.nsmallest(10, "Change %").reset_index(drop=True),
-            "asof": asof, "source": source}
-
-
-def demo_movers() -> dict:
-    """Synthetic gainers/losers for offline demo mode."""
-    import numpy as np
-    rng = np.random.default_rng(42)
-    syms = [f"DEMO{i:02d}" for i in range(1, 31)]
-    df = pd.DataFrame({
-        "Symbol": syms,
-        "Name": [f"Demo Company {i}" for i in range(1, 31)],
-        "Price": rng.uniform(20, 500, len(syms)).round(2),
-        "Change %": rng.normal(0, 3, len(syms)).round(2),
-    })
-    return {"gainers": df.nlargest(10, "Change %").reset_index(drop=True),
-            "losers": df.nsmallest(10, "Change %").reset_index(drop=True),
-            "asof": "demo data", "source": "demo data"}
 
 
 def _bar_dicts(df: pd.DataFrame) -> list:
@@ -2451,13 +2461,12 @@ def summary(df: pd.DataFrame) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Top options volume ranking (Stock Analyzer "Top Options Volume" tab)
+# Top options volume — expiring today (Stock Analyzer "Top Options Volume" tab)
 # ---------------------------------------------------------------------------
 # Ranked universe, not a full-market scan: one Alpaca options-snapshots
 # call per symbol (plus pagination), so scanning all listed stocks would
 # take minutes inside the app's refresh loop. Options volume is extremely
-# concentrated, so the true top 20 sits inside this list in practice.
-# Index ETFs (SPY/QQQ/IWM) are excluded: the analyzer is stocks-only.
+# concentrated, so the true top 10 sits inside this list in practice.
 OPTIONS_UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "AMD", "AVGO", "NFLX",
     "GOOGL", "PLTR", "MSTR", "COIN", "JPM", "BAC", "WMT", "COST", "LLY",
@@ -2486,93 +2495,26 @@ OPTIONS_NAMES = {
 }
 
 
-def options_volume_ranking() -> dict:
-    """Today's total options contracts traded (puts + calls) per symbol,
-    expiries within 30 days — where most of a day's options volume sits.
-    Alpaca options snapshots, OPRA feed first then the indicative feed,
-    same pattern as the charting app's PCR fetch. Returns
-    {"rows": [...], "source": ..., "asof": ...} or {"error": ...}."""
-    import re
-    import requests
-    from datetime import datetime, timedelta
-
-    if not alpaca_is_configured():
-        return {"error": "Alpaca options data is not configured "
-                          "(keys live in Streamlit Secrets)."}
-    headers = _alpaca_headers()
-    today = datetime.now(ZoneInfo("America/New_York")).date()
-    occ = re.compile(r"^[A-Z]+\d{6}([CP])\d{8}$")
-    rows, feeds = [], set()
-    for sym in OPTIONS_UNIVERSE:
-        for feed in ("opra", "indicative"):
-            try:
-                token, pages = None, 0
-                pv = cv = 0.0
-                while pages < 20:
-                    params = {"feed": feed, "limit": 1000,
-                              "expiration_date_gte": today.isoformat(),
-                              "expiration_date_lte":
-                                  (today + timedelta(days=30)).isoformat()}
-                    if token:
-                        params["page_token"] = token
-                    r = requests.get(
-                        "https://data.alpaca.markets/v1beta1/options"
-                        f"/snapshots/{sym}", params=params, headers=headers,
-                        timeout=30)
-                    if r.status_code in (401, 403):
-                        break  # not entitled to this feed — try the next one
-                    r.raise_for_status()
-                    payload = r.json()
-                    for csym, snap in (payload.get("snapshots") or {}).items():
-                        m = occ.match(csym)
-                        if not m:
-                            continue
-                        vol = float((snap.get("dailyBar") or {}).get("v") or 0)
-                        if m.group(1) == "P":
-                            pv += vol
-                        else:
-                            cv += vol
-                    token = payload.get("next_page_token")
-                    pages += 1
-                    if not token:
-                        break
-                if cv + pv <= 0:
-                    continue  # empty chain on this feed — try the next one
-                feeds.add(feed)
-                rows.append({"Symbol": sym, "Name": OPTIONS_NAMES.get(sym, sym),
-                             "Options volume": int(cv + pv),
-                             "Calls": int(cv), "Puts": int(pv),
-                             "P/C": round(pv / cv, 2) if cv else None})
-                break
-            except Exception:
-                continue
-    if not rows:
-        return {"error": "No options volume returned — the Alpaca options "
-                          "feed may be unavailable."}
-    rows.sort(key=lambda r: r["Options volume"], reverse=True)
-    feed_label = feeds.pop() if len(feeds) == 1 else "mixed feeds"
-    return {"rows": rows, "source": f"Alpaca ({feed_label})",
-            "asof": datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M")}
 
 
 # ---------------------------------------------------------------------------
-# 0DTE board (Stock Analyzer "0DTE Board" tab)
+# Top options volume — expiring today (Stock Analyzer "Top Options Volume" tab)
 # ---------------------------------------------------------------------------
 # SPY/QQQ are included even though the analyzer is otherwise stocks-only:
-# 0DTE trading lives on the index ETFs, and single-stock 0DTE chains
+# 0DTE volume lives on the index ETFs, and single-stock 0DTE chains
 # mostly exist on Fridays (weekly expiry).
-ZERO_DTE_UNIVERSE = ["SPY", "QQQ"] + OPTIONS_UNIVERSE
-ZERO_DTE_NAMES = {"SPY": "S&P 500 ETF", "QQQ": "Nasdaq-100 ETF",
-                  **OPTIONS_NAMES}
+TODAY_EXPIRY_UNIVERSE = ["SPY", "QQQ"] + OPTIONS_UNIVERSE
+TODAY_EXPIRY_NAMES = {"SPY": "S&P 500 ETF", "QQQ": "Nasdaq-100 ETF",
+                      **OPTIONS_NAMES}
 
 
-def zero_dte_board() -> dict:
-    """Top 0DTE contracts by today's volume: market-wide top 10 calls and
-    top 10 puts, plus per-symbol top 10s for drill-down. One Alpaca options
-    snapshots call per symbol, expiry window = today only, OPRA feed
-    first then the indicative feed. Returns {"calls": [...], "puts": [...],
-    "by_symbol": {sym: {"calls": [...], "puts": [...]}}, "source": ...,
-    "asof": ...} or {"error": ...}."""
+def today_expiry_ranking(top_contracts: int = 3) -> dict:
+    """Top 10 stocks by today's options volume — contracts expiring today
+    only (0DTE). One Alpaca options snapshots call per symbol, OPRA feed
+    first then the indicative feed, same pattern as the charting app's
+    PCR fetch. Each row carries its top `top_contracts` calls and puts
+    by today's volume, with strike, bid, ask, last, volume and OI.
+    Returns {"rows": [...], "source": ..., "asof": ...} or {"error": ...}."""
     import re
     import requests
     from datetime import datetime
@@ -2583,11 +2525,9 @@ def zero_dte_board() -> dict:
     headers = _alpaca_headers()
     today = datetime.now(ZoneInfo("America/New_York")).date()
     occ = re.compile(r"^[A-Z]+(\d{6})([CP])(\d{8})$")
-    calls, puts = [], []
-    by_symbol = {}
-    feeds = set()
-    for sym in ZERO_DTE_UNIVERSE:
-        sym_calls, sym_puts = [], []
+    rows, feeds = [], set()
+    for sym in TODAY_EXPIRY_UNIVERSE:
+        contracts = []
         for feed in ("opra", "indicative"):
             try:
                 token, pages = None, 0
@@ -2613,18 +2553,15 @@ def zero_dte_board() -> dict:
                         vol = float((snap.get("dailyBar") or {}).get("v") or 0)
                         if vol <= 0:
                             continue
-                        row = {"Underlying": sym,
-                               "Strike": int(m.group(3)) / 1000,
-                               "Last": (snap.get("latestTrade") or {}).get("p")
-                                       or (snap.get("dailyBar") or {}).get("c"),
-                               "Volume": int(vol),
-                               "OI": int(snap.get("openInterest") or 0),
-                               "Bid": (snap.get("latestQuote") or {}).get("bp"),
-                               "Ask": (snap.get("latestQuote") or {}).get("ap"),
-                               "Delta": (snap.get("greeks") or {}).get("delta"),
-                               "IV": snap.get("impliedVolatility")}
-                        (sym_puts if m.group(2) == "P"
-                         else sym_calls).append(row)
+                        contracts.append({
+                            "Type": "Put" if m.group(2) == "P" else "Call",
+                            "Strike": int(m.group(3)) / 1000,
+                            "Bid": (snap.get("latestQuote") or {}).get("bp"),
+                            "Ask": (snap.get("latestQuote") or {}).get("ap"),
+                            "Last": (snap.get("latestTrade") or {}).get("p")
+                                    or (snap.get("dailyBar") or {}).get("c"),
+                            "Volume": int(vol),
+                            "OI": int(snap.get("openInterest") or 0)})
                         found = True
                     token = payload.get("next_page_token")
                     pages += 1
@@ -2635,19 +2572,26 @@ def zero_dte_board() -> dict:
                     break
             except Exception:
                 continue
-        sym_calls.sort(key=lambda r: r["Volume"], reverse=True)
-        sym_puts.sort(key=lambda r: r["Volume"], reverse=True)
-        if sym_calls or sym_puts:
-            by_symbol[sym] = {"calls": sym_calls[:10], "puts": sym_puts[:10]}
-            calls.extend(sym_calls)
-            puts.extend(sym_puts)
-    if not calls and not puts:
-        return {"error": "No 0DTE contracts with volume found for today — "
-                          "single-stock 0DTE chains mostly exist on Fridays; "
-                          "SPY/QQQ list every trading day."}
-    calls.sort(key=lambda r: r["Volume"], reverse=True)
-    puts.sort(key=lambda r: r["Volume"], reverse=True)
+        if not contracts:
+            continue
+        calls = [c for c in contracts if c["Type"] == "Call"]
+        puts = [c for c in contracts if c["Type"] == "Put"]
+        cv = sum(c["Volume"] for c in calls)
+        pv = sum(c["Volume"] for c in puts)
+        calls.sort(key=lambda c: c["Volume"], reverse=True)
+        puts.sort(key=lambda c: c["Volume"], reverse=True)
+        rows.append({"Symbol": sym,
+                     "Name": TODAY_EXPIRY_NAMES.get(sym, sym),
+                     "Options volume": int(cv + pv),
+                     "Calls": int(cv), "Puts": int(pv),
+                     "P/C": round(pv / cv, 2) if cv else None,
+                     "top_calls": calls[:top_contracts],
+                     "top_puts": puts[:top_contracts]})
+    if not rows:
+        return {"error": "No options expiring today found — single-stock "
+                          "0DTE chains mostly exist on Fridays; SPY/QQQ "
+                          "list every trading day."}
+    rows.sort(key=lambda r: r["Options volume"], reverse=True)
     feed_label = feeds.pop() if len(feeds) == 1 else "mixed feeds"
-    return {"calls": calls[:10], "puts": puts[:10], "by_symbol": by_symbol,
-            "source": f"Alpaca ({feed_label})",
+    return {"rows": rows[:10], "source": f"Alpaca ({feed_label})",
             "asof": datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M")}

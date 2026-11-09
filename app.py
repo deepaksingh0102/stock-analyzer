@@ -102,52 +102,15 @@ def load_trades(symbol: str, use_demo: bool, bucket: int = 0):
 
 
 @st.cache_data(ttl=600, max_entries=32, show_spinner=False)
-def load_sp500_movers(use_demo: bool, bucket: int = 0):
-    """Top 10 S&P 500 gainers/losers. {"error": msg} on failure."""
-    if use_demo:
-        return data.demo_movers()
-    try:
-        return data.sp500_movers()
-    except Exception as exc:
-        return {"error": str(exc)[:200]}
-
-
-@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
 def load_options_ranking(use_demo: bool, bucket: int = 0):
-    """Top-20 options-volume ranking. {"error": msg} on failure."""
+    """Top-10 options-volume ranking, expiry today. {"error": msg} on failure."""
     if use_demo:
         return {"error": "Demo mode is offline — the options ranking needs "
                           "live Alpaca options data."}
     try:
-        return data.options_volume_ranking()
+        return data.today_expiry_ranking()
     except Exception as exc:
         return {"error": str(exc)[:200]}
-
-
-@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
-def load_0dte_board(use_demo: bool, bucket: int = 0):
-    """0DTE board. {"error": msg} on failure."""
-    if use_demo:
-        return {"error": "Demo mode is offline — the 0DTE board needs "
-                          "live Alpaca options data."}
-    try:
-        return data.zero_dte_board()
-    except Exception as exc:
-        return {"error": str(exc)[:200]}
-
-
-def _style_movers(df: pd.DataFrame):
-    """Format movers table: $ price, ±% change, green/red change values."""
-    sty = df.style.format({"Price": "${:,.2f}", "Change %": "{:+.2f}%"})
-    def _color(v):
-        try:
-            return "color: #16a34a" if v > 0 else ("color: #dc2626" if v < 0 else "")
-        except TypeError:
-            return ""
-    try:
-        return sty.map(_color, subset=["Change %"])
-    except Exception:
-        return sty
 
 
 def _bucket(live: bool, refresh_secs: int, bucket_secs: int | None = None) -> int:
@@ -204,7 +167,9 @@ with st.sidebar:
 
     st.header("Settings")
     live = st.toggle("Live tracking (auto-refresh)", value=True,
-                     help="When on, the analysis re-runs automatically at the interval below.")
+                     help="When on, the analysis re-runs automatically at the interval "
+                          "below — but only while the US market is open (Mon–Fri, "
+                          "9:30 AM–4:00 PM ET).")
     refresh_secs = st.number_input("Refresh every (seconds)", min_value=30, max_value=3600,
                                    value=max(config.AUTO_REFRESH_SECONDS, 30), step=5,
                                    help="How often live tracking re-runs the analysis. "
@@ -231,11 +196,14 @@ with st.sidebar:
              "Chart & Signal tab: the chart, verdict, radar and "
              "forecast are computed as of that session's close, from "
              "that session's bars alone. The live quote, tape checks "
-             "and auto-refresh pause in replay; Top Movers and "
-             "Top Options Volume and 0DTE Board stay live. Alpaca replays go back years; a "
+             "and auto-refresh pause in replay; Top Options Volume stays live. Alpaca replays go back years; a "
              "Yahoo-only setup can only replay about the last 30 days "
              "of 1-minute bars.")
     past_mode = bool(view_date) and view_date < _today_et
+    # Auto-refresh runs only while the US market is open: the fragment
+    # timers below key off this, so overnight/weekend/holiday the app goes
+    # static instead of re-fetching unchanged data.
+    market_open = data.us_market_open()
     use_demo = st.toggle("Demo data (offline / no internet)", value=False)
 
     if signals.alpaca_is_configured():
@@ -246,8 +214,8 @@ with st.sidebar:
 
 
 st.title("📈 Stock Analyzer")
-tab_detail, tab_movers, tab_opts, tab_0dte = st.tabs(
-    ["Chart & Signal", "Top Movers", "Top Options Volume", "0DTE Board"])
+tab_detail, tab_opts = st.tabs(
+    ["Chart & Signal", "Top Options Volume"])
 
 
 def _thresholds():
@@ -266,7 +234,7 @@ CHART_TF_TRAILING = {"5 minutes": 5, "15 minutes": 15, "1 hour": 60,
 # ---------------------------------------------------------------------------
 # Tab 1: one symbol in detail
 # ---------------------------------------------------------------------------
-@st.fragment(run_every=refresh_secs if (live and not past_mode) else None)
+@st.fragment(run_every=refresh_secs if (live and market_open and not past_mode) else None)
 def detail_view(use_demo: bool,
                 live: bool, refresh_secs: int, chart_tf: str = "Since market open",
                 view_date=None, past_mode: bool = False):
@@ -281,11 +249,15 @@ def detail_view(use_demo: bool,
     if past_mode:
         st.caption(f"📅 Replay — viewing the {view_date} session as of "
                    "its close. Live quote, tape checks and auto-refresh "
-                   "are paused; Top Movers, Top Options Volume and 0DTE Board stay live.")
-    elif live:
+                   "are paused; Top Options Volume stays live.")
+    elif live and market_open:
         st.caption(f"🟢 Live tracking on — refreshing every {refresh_secs}s · "
                    f"last updated {_now_et().strftime('%H:%M:%S')} ET · "
                    "auto-refresh pauses while this tab is in the background")
+    elif live:
+        st.caption("⏸ Live tracking on — the US market is closed, so auto-refresh "
+                   "is paused until the next open (Mon–Fri, 9:30 AM–4:00 PM ET). "
+                   "Use 🔄 Refresh now for a manual update.")
     # Tiered freshness: not all data needs the same refresh rate. The quote
     # and trade tape are tiny and live-feeling (30s); 1-min bars only
     # move every minute (60s); daily bars barely change intraday (5 min).
@@ -391,8 +363,7 @@ def detail_view(use_demo: bool,
     # bar is 15:59 ET and after-hours quotes end ~20:00 ET, so flagging
     # those as "delayed" would be a false alarm.
     now_et = _now_et()
-    in_session = (now_et.weekday() < 5 and
-                  (9, 30) <= (now_et.hour, now_et.minute) <= (16, 0))
+    in_session = data.us_market_open(now_et)
     market_closed = not in_session
     # In the first minutes after the open the latest completed bar is still
     # yesterday's 15:59 — the feed isn't delayed, it's just warming up. Only
@@ -487,7 +458,20 @@ def detail_view(use_demo: bool,
     trailing = CHART_TF_TRAILING.get(chart_tf)
     frame = data.intraday_frame(df_1m, "session", trailing_minutes=trailing)
     or_ = data.opening_range(df_1m)
-    pivots = data.prior_day_pivots(df_daily)
+    asof = view_date if past_mode else None
+    pivots = data.prior_day_pivots(df_daily, asof_date=asof)
+    sr = data.support_resistance(df_daily, res["entry"], asof_date=asof)
+    # Chart lines: 20-day and prior-day highs/lows only — R1/S1 are
+    # already drawn as pivot lines, so they are left out here to avoid
+    # double-drawing the same level.
+    chart_sr = []
+    if sr:
+        for lv in sr["resistances"]:
+            if lv["label"] in ("20-day high", "Prior day high"):
+                chart_sr.append({**lv, "type": "resistance"})
+        for lv in sr["supports"]:
+            if lv["label"] in ("20-day low", "Prior day low"):
+                chart_sr.append({**lv, "type": "support"})
     if frame.empty:
         st.info("Not enough intraday data to draw the chart.")
     else:
@@ -497,7 +481,7 @@ def detail_view(use_demo: bool,
             or_low=or_["low"] if or_ else None,
             window_label=(f"Last {chart_tf}" if trailing is not None
                           else "Since market open"),
-            pivots=pivots),
+            pivots=pivots, sr_levels=chart_sr),
             use_container_width=True,
             key=f"intraday_{symbol}_{chart_tf.replace(' ', '_')}")
         st.caption(data.frame_caption(frame, "1 minute"))
@@ -536,6 +520,38 @@ def detail_view(use_demo: bool,
                 "- **ADX / DI** — trend *strength*, not direction. The dark ADX line "
                 "above the dotted 25 line = a real trend; below 20 = chop. The green +DI above the "
                 "red -DI = buyers in control; red above green = sellers.")
+
+    # ---- Support & Resistance (daily structure) ----
+    st.subheader("Support & Resistance (daily structure)")
+    if sr:
+        sr_rows = []
+        for lv in sr["resistances"]:
+            sr_rows.append({"Level": f"🔴 {lv['label']}",
+                            "Price": f"${lv['value']:,.2f}",
+                            "Distance from price": f"{lv['distance_pct']:+.2f}%"})
+        for lv in sr["supports"]:
+            sr_rows.append({"Level": f"🟢 {lv['label']}",
+                            "Price": f"${lv['value']:,.2f}",
+                            "Distance from price": f"{lv['distance_pct']:+.2f}%"})
+        st.dataframe(pd.DataFrame(sr_rows), hide_index=True,
+                     use_container_width=True)
+        nr, ns = sr["nearest_resistance"], sr["nearest_support"]
+        read = []
+        if nr:
+            read.append(f"nearest resistance ${nr['value']:,.2f} "
+                        f"({nr['label']}, {nr['distance_pct']:+.2f}%)")
+        if ns:
+            read.append(f"nearest support ${ns['value']:,.2f} "
+                        f"({ns['label']}, {ns['distance_pct']:+.2f}%)")
+        if read:
+            st.caption("Price sits between " + " and ".join(read) + ".")
+        st.caption(f"From completed daily bars through {sr['asof']} — "
+                   "20-day high/low, prior-day high/low, pivot R1/S1. "
+                   "Reference levels, not a prediction; a level that "
+                   "breaks becomes the other side. The 20-day and "
+                   "prior-day levels are also drawn on the chart above.")
+    else:
+        st.info("Not enough completed daily bars for support/resistance yet.")
 
     # ---- Direction Radar ----
     st.subheader("Direction Radar — what's changing right now")
@@ -810,47 +826,29 @@ def detail_view(use_demo: bool,
         ("Alpaca" if data.alpaca_is_configured() else "Yahoo Finance")
     st.caption(f"Data as of {df_1m.index[-1]} · source: {src}"
                + (f" · replay of {view_date}" if past_mode
-                  else (" · live tracking on" if live else "")))
+                  else ("" if not live else
+                        (" · live tracking on" if market_open
+                         else " · live tracking paused (market closed)"))))
 
 
 # ---------------------------------------------------------------------------
-@st.fragment(run_every=refresh_secs if live else None)
+@st.fragment(run_every=refresh_secs if (live and market_open) else None)
 # ---------------------------------------------------------------------------
-# Tab 2: S&P 500 top movers
+# Tab 2: Top 10 stocks by options volume — expiring today
 # ---------------------------------------------------------------------------
-def movers_view(use_demo: bool, live: bool, refresh_secs: int):
-    st.subheader("S&P 500 — Top Movers of the Day")
-    # Daily closes: 5-min refresh is plenty.
-    bucket = _bucket(live, refresh_secs, bucket_secs=300)
-    with st.spinner("Loading S&P 500 movers…"):
-        m = load_sp500_movers(use_demo, bucket)
-    if m.get("error"):
-        st.error(f"Could not load S&P 500 movers: {m['error']}")
-        st.caption("Check your internet connection and try again.")
-        return
-    st.caption(f"As of {m['asof']} · source: {m.get('source', 'Yahoo Finance')}")
-    st.markdown("**🟢 Top 10 Gainers**")
-    st.dataframe(_style_movers(m["gainers"]), hide_index=True,
-                 use_container_width=True)
-    st.markdown("**🔴 Top 10 Losers**")
-    st.dataframe(_style_movers(m["losers"]), hide_index=True,
-                 use_container_width=True)
-
-
-@st.fragment(run_every=refresh_secs if live else None)
 def options_volume_view(use_demo: bool, live: bool, refresh_secs: int):
-    st.subheader("Top 20 Stocks by Options Volume")
+    st.subheader("Top 10 Stocks by Options Volume — expiring today")
     # A 50-symbol options scan is slow (one snapshots call per symbol),
-    # so it refreshes on the same 5-min bucket as Top Movers.
+    # so it refreshes on a 5-min bucket.
     bucket = _bucket(live, refresh_secs, bucket_secs=300)
-    with st.spinner("Scanning options volume… (first scan can take up to a minute)"):
+    with st.spinner("Scanning today's expiry chains… (first scan can take up to a minute)"):
         r = load_options_ranking(use_demo, bucket)
     if r.get("error"):
         st.error(f"Could not load options ranking: {r['error']}")
         st.caption("This tab needs Alpaca options data (keys in Streamlit Secrets).")
         return
     rows = []
-    for row in r["rows"][:20]:
+    for row in r["rows"][:10]:
         sym = row["Symbol"]
         try:
             df = load_daily(sym, use_demo, bucket)
@@ -863,70 +861,37 @@ def options_volume_view(use_demo: bool, live: bool, refresh_secs: int):
                      "Calls": row["Calls"], "Puts": row["Puts"], "P/C": row["P/C"],
                      "Price": price, "Change %": chg})
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-    st.caption(f"As of {r['asof']} ET · source: {r['source']} · today's contracts "
-               "traded, expiries within 30 days, ranked across a 50-name liquid "
-               "universe (stocks only — SPY/QQQ/IWM excluded). A full-market scan "
-               "is too slow for the app's refresh loop.")
+    st.caption(f"As of {r['asof']} ET · source: {r['source']} · contracts "
+               "expiring today only, ranked across a 50-name liquid "
+               "universe plus SPY/QQQ (0DTE volume lives on the index "
+               "ETFs; single-stock 0DTE chains mostly exist on Fridays). "
+               "A full-market scan is too slow for the app's refresh loop.")
     st.caption("Tip: type any of these symbols in the sidebar search to see its chart.")
 
-
-def _0dte_table(rows, price_fn):
-    out = []
-    for r in rows:
-        out.append({"Underlying": r["Underlying"], "Strike": r["Strike"],
-                    "Underlying price": price_fn(r["Underlying"]),
-                    "Last": r["Last"], "Volume": r["Volume"], "OI": r["OI"],
-                    "Bid": r["Bid"], "Ask": r["Ask"],
-                    "Delta": (round(r["Delta"], 2)
-                              if r["Delta"] is not None else None),
-                    "IV": (round(r["IV"], 2) if r["IV"] is not None else None)})
-    return pd.DataFrame(out)
-
-
-@st.fragment(run_every=refresh_secs if live else None)
-def zero_dte_view(use_demo: bool, live: bool, refresh_secs: int):
-    st.subheader("0DTE Board — expires today")
-    # Same 5-min bucket as the other slow tabs: one snapshots call per symbol.
-    bucket = _bucket(live, refresh_secs, bucket_secs=300)
-    with st.spinner("Scanning today's expiry chains…"):
-        b = load_0dte_board(use_demo, bucket)
-    if b.get("error"):
-        st.error(f"Could not load 0DTE board: {b['error']}")
-        st.caption("This tab needs Alpaca options data (keys in Streamlit Secrets).")
-        return
-    scope = st.selectbox("Underlying",
-                         ["All underlyings"] + list(data.ZERO_DTE_UNIVERSE),
-                         help="All underlyings ranks every 0DTE contract by volume; "
-                              "pick one to see only its top 10 calls and puts.")
-    if scope == "All underlyings":
-        calls, puts = b["calls"], b["puts"]
-    else:
-        entry = b["by_symbol"].get(scope, {"calls": [], "puts": []})
-        calls, puts = entry["calls"], entry["puts"]
-
-    def _price(sym):
-        try:
-            return round(data.summary(load_daily(sym, use_demo, bucket))["price"], 2)
-        except Exception:
-            return None
-
-    st.markdown("**Top 10 0DTE Calls by volume**")
-    st.dataframe(_0dte_table(calls, _price), hide_index=True,
-                 use_container_width=True)
-    st.markdown("**Top 10 0DTE Puts by volume**")
-    st.dataframe(_0dte_table(puts, _price), hide_index=True,
-                 use_container_width=True)
-    st.caption(f"As of {b['asof']} ET · source: {b['source']} · contracts expiring "
-               "today only, ranked by today's traded volume. SPY/QQQ are included "
-               "because 0DTE trading lives there; single-stock 0DTE chains mostly "
-               "exist on Fridays (weekly expiry).")
+    # Top contracts expiring today, per stock: strike, bid and ask.
+    st.subheader("Top contracts expiring today — strike, bid & ask")
+    for row in r["rows"][:10]:
+        sym = row["Symbol"]
+        contracts = sorted(row["top_calls"] + row["top_puts"],
+                           key=lambda c: c["Volume"], reverse=True)
+        if not contracts:
+            continue
+        with st.expander(f"{sym} — top {len(contracts)} contracts expiring "
+                         f"today ({row['Options volume']:,} contracts total)"):
+            st.dataframe(pd.DataFrame(contracts),
+                         hide_index=True, use_container_width=True)
 
 
 with tab_detail:
     detail_view(use_demo, live, refresh_secs, chart_tf, view_date, past_mode)
-with tab_movers:
-    movers_view(use_demo, live, refresh_secs)
 with tab_opts:
     options_volume_view(use_demo, live, refresh_secs)
-with tab_0dte:
-    zero_dte_view(use_demo, live, refresh_secs)
+
+# Build fingerprint: hash of this file at render time, so the deployed
+# build can be confirmed against the delivered file at a glance.
+try:
+    import hashlib as _hashlib
+    _digest = _hashlib.md5(open(__file__, "rb").read()).hexdigest()[:6]
+    st.caption(f"build 2026-11-09 · {_digest}")
+except Exception:
+    pass
