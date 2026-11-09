@@ -246,11 +246,20 @@ def detail_view(use_demo: bool,
     if not symbol:
         st.info("Type a stock symbol in the sidebar to begin.")
         return
+    # Fresh market check, every fragment run: the @st.fragment timer above
+    # is set ONCE, when the page loads — a session opened during market
+    # hours keeps its timer after the 4:00 PM close, because fragment
+    # reruns don't re-execute the top-level code that set run_every.
+    # `market_open` below is that load-time value; `open_now` is the
+    # truth right now, and the loading block below uses it to stop
+    # fetching once the market is closed.
+    open_now = data.us_market_open()
+    closed_now = bool(live and not past_mode and not open_now)
     if past_mode:
         st.caption(f"📅 Replay — viewing the {view_date} session as of "
                    "its close. Live quote, tape checks and auto-refresh "
                    "are paused; Top Options Volume stays live.")
-    elif live and market_open:
+    elif live and open_now:
         st.caption(f"🟢 Live tracking on — refreshing every {refresh_secs}s · "
                    f"last updated {_now_et().strftime('%H:%M:%S')} ET · "
                    "auto-refresh pauses while this tab is in the background")
@@ -266,40 +275,69 @@ def detail_view(use_demo: bool,
     bucket = _bucket(live, refresh_secs)
     bucket_mid = _bucket(live, refresh_secs, bucket_secs=60)
     bucket_slow = _bucket(live, refresh_secs, bucket_secs=300)
+    # After-close snapshot: once the market is closed, re-render from the
+    # data fetched during the session instead of fetching again — the
+    # timer keeps firing, but no network call and no spinner follows.
+    # A manual "Refresh now" (refresh_nonce bump) invalidates it, so a
+    # manual refresh still works any time.
+    snap_key = f"detail_snap_{symbol}"
+    snap = None
+    if closed_now:
+        snap = st.session_state.get(snap_key)
+        if snap is not None and (
+                snap.get("date") != _today_et.isoformat()
+                or snap.get("nonce") != st.session_state.get("refresh_nonce", 0)):
+            snap = None  # stale session, or a manual refresh was requested
     try:
-        with st.spinner(f"Loading {symbol}…"):
-            df_daily = load_daily(symbol, use_demo, bucket_slow)
-            # The raw feed is 1-minute bars (chart plots them directly, new
-            # candle every minute). The engine reads the same 1-minute bars,
-            # so the RSI/MACD/EMA values behind the verdict are exactly the
-            # ones plotted on the chart.
-            if past_mode:
-                # Replay: the intraday window ends at the picked session
-                # and the daily frame is truncated at it (its indicators
-                # are trailing-only, so truncating after computing them
-                # leaks nothing from later days). No live quote or tape
-                # exists for a past session — the engine's no-quote path
-                # is the same one demo mode uses.
-                end_iso = (datetime(view_date.year, view_date.month,
-                                    view_date.day, tzinfo=ET)
-                           + timedelta(days=1)).astimezone(
-                               ZoneInfo("UTC")).isoformat()
-                df_daily = df_daily[df_daily.index.date <= view_date]
-                df_1m = load_intraday_replay(symbol, use_demo, end_iso)
-                bench_1m = (load_intraday_replay(bench, use_demo, end_iso)
-                            if bench != symbol else None)
-                bench2_1m = (load_intraday_replay(bench2, use_demo, end_iso)
-                             if bench2 else None)
-                quote, quote_note = None, ""
-                trades = None
-            else:
-                df_1m = load_intraday(symbol, use_demo, bucket_mid)
-                bench_1m = (load_intraday(bench, use_demo, bucket_mid)
-                            if bench != symbol else None)
-                bench2_1m = (load_intraday(bench2, use_demo, bucket_mid)
-                             if bench2 else None)
-                quote, quote_note = load_quote(symbol, use_demo, bucket)
-                trades = load_trades(symbol, use_demo, bucket)
+        if snap is not None:
+            df_daily = snap["df_daily"]
+            df_1m = snap["df_1m"]
+            bench_1m = snap["bench_1m"]
+            bench2_1m = snap["bench2_1m"]
+            quote, quote_note = snap["quote"], snap["quote_note"]
+            trades = snap["trades"]
+        else:
+            with st.spinner(f"Loading {symbol}…"):
+                df_daily = load_daily(symbol, use_demo, bucket_slow)
+                # The raw feed is 1-minute bars (chart plots them directly, new
+                # candle every minute). The engine reads the same 1-minute bars,
+                # so the RSI/MACD/EMA values behind the verdict are exactly the
+                # ones plotted on the chart.
+                if past_mode:
+                    # Replay: the intraday window ends at the picked session
+                    # and the daily frame is truncated at it (its indicators
+                    # are trailing-only, so truncating after computing them
+                    # leaks nothing from later days). No live quote or tape
+                    # exists for a past session — the engine's no-quote path
+                    # is the same one demo mode uses.
+                    end_iso = (datetime(view_date.year, view_date.month,
+                                        view_date.day, tzinfo=ET)
+                               + timedelta(days=1)).astimezone(
+                                   ZoneInfo("UTC")).isoformat()
+                    df_daily = df_daily[df_daily.index.date <= view_date]
+                    df_1m = load_intraday_replay(symbol, use_demo, end_iso)
+                    bench_1m = (load_intraday_replay(bench, use_demo, end_iso)
+                                if bench != symbol else None)
+                    bench2_1m = (load_intraday_replay(bench2, use_demo, end_iso)
+                                 if bench2 else None)
+                    quote, quote_note = None, ""
+                    trades = None
+                else:
+                    df_1m = load_intraday(symbol, use_demo, bucket_mid)
+                    bench_1m = (load_intraday(bench, use_demo, bucket_mid)
+                                if bench != symbol else None)
+                    bench2_1m = (load_intraday(bench2, use_demo, bucket_mid)
+                                 if bench2 else None)
+                    quote, quote_note = load_quote(symbol, use_demo, bucket)
+                    trades = load_trades(symbol, use_demo, bucket)
+            if not past_mode:
+                st.session_state[snap_key] = {
+                    "date": _today_et.isoformat(),
+                    "nonce": st.session_state.get("refresh_nonce", 0),
+                    "df_daily": df_daily, "df_1m": df_1m,
+                    "bench_1m": bench_1m, "bench2_1m": bench2_1m,
+                    "quote": quote, "quote_note": quote_note,
+                    "trades": trades}
     except Exception as exc:
         st.error(f"Could not load **{symbol}**: {exc}")
         st.caption("Tip: turn on **Demo data** in the sidebar to test without internet.")
@@ -346,7 +384,7 @@ def detail_view(use_demo: bool,
         hist.extend(seed_pts)
         hist.sort(key=lambda p: p[0])
         st.session_state[f"{hist_key}_seeded"] = True
-    if res["radar"] and not past_mode:
+    if res["radar"] and not past_mode and open_now:
         now = _now_et()
         if not hist or (now - hist[-1][0]).total_seconds() >= 30:
             hist.append((now, res["radar"]["score"]))
@@ -839,27 +877,45 @@ def detail_view(use_demo: bool,
 def options_volume_view(use_demo: bool, live: bool, refresh_secs: int):
     st.subheader("Top 10 Stocks by Options Volume — expiring today")
     # A 50-symbol options scan is slow (one snapshots call per symbol),
-    # so it refreshes on a 5-min bucket.
+    # Same frozen-timer caveat as Chart & Signal (see detail_view): the
+    # fragment timer is set at page load, so after the close this runs
+    # from the snapshot instead of re-scanning the options chains.
+    # A manual "Refresh now" (refresh_nonce bump) invalidates it.
     bucket = _bucket(live, refresh_secs, bucket_secs=300)
-    with st.spinner("Scanning today's expiry chains… (first scan can take up to a minute)"):
-        r = load_options_ranking(use_demo, bucket)
-    if r.get("error"):
-        st.error(f"Could not load options ranking: {r['error']}")
-        st.caption("This tab needs Alpaca options data (keys in Streamlit Secrets).")
-        return
-    rows = []
-    for row in r["rows"][:10]:
-        sym = row["Symbol"]
-        try:
-            df = load_daily(sym, use_demo, bucket)
-            s = data.summary(df)
-            price, chg = round(s["price"], 2), round(s["change_pct"], 2)
-        except Exception:
-            price, chg = None, None
-        rows.append({"#": len(rows) + 1, "Symbol": sym, "Company": row["Name"],
-                     "Options volume": row["Options volume"],
-                     "Calls": row["Calls"], "Puts": row["Puts"], "P/C": row["P/C"],
-                     "Price": price, "Change %": chg})
+    closed_now = bool(live and not data.us_market_open())
+    osnap = None
+    if closed_now:
+        osnap = st.session_state.get("options_snap")
+        if osnap is not None and (
+                osnap.get("date") != _today_et.isoformat()
+                or osnap.get("nonce") != st.session_state.get("refresh_nonce", 0)):
+            osnap = None
+    if osnap is not None:
+        r, rows = osnap["r"], osnap["rows"]
+    else:
+        with st.spinner("Scanning today's expiry chains… (first scan can take up to a minute)"):
+            r = load_options_ranking(use_demo, bucket)
+        if r.get("error"):
+            st.error(f"Could not load options ranking: {r['error']}")
+            st.caption("This tab needs Alpaca options data (keys in Streamlit Secrets).")
+            return
+        rows = []
+        for row in r["rows"][:10]:
+            sym = row["Symbol"]
+            try:
+                df = load_daily(sym, use_demo, bucket)
+                s = data.summary(df)
+                price, chg = round(s["price"], 2), round(s["change_pct"], 2)
+            except Exception:
+                price, chg = None, None
+            rows.append({"#": len(rows) + 1, "Symbol": sym, "Company": row["Name"],
+                         "Options volume": row["Options volume"],
+                         "Calls": row["Calls"], "Puts": row["Puts"], "P/C": row["P/C"],
+                         "Price": price, "Change %": chg})
+        st.session_state["options_snap"] = {
+            "date": _today_et.isoformat(),
+            "nonce": st.session_state.get("refresh_nonce", 0),
+            "r": r, "rows": rows}
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
     st.caption(f"As of {r['asof']} ET · source: {r['source']} · contracts "
                "expiring today only, ranked across a 50-name liquid "

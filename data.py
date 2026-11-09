@@ -498,7 +498,9 @@ def support_resistance(df_daily: pd.DataFrame, entry: float,
     lookahead from today's still-forming bar.
 
     Resistances: 20-day high, prior-day high, pivot R1.
-    Supports: 20-day low, prior-day low, pivot S1.
+    Supports: 20-day low, prior-day low, pivot S1. A level's role is
+    decided by where price sits now — a prior-day high already broken
+    above counts as support — not by which bar it came from.
     Each side is sorted nearest-first. Levels within 0.1% of each other
     are merged (keeps the first-listed label). Returns None when fewer
     than 2 completed bars exist. Reference levels, not a prediction —
@@ -540,13 +542,24 @@ def support_resistance(df_daily: pd.DataFrame, entry: float,
         ("Prior day low", l),
         ("Pivot S1", 2 * p - h),
     ])
-    resistances.sort(key=lambda r: r["value"])          # nearest above first
-    supports.sort(key=lambda s: s["value"], reverse=True)  # nearest below first
-    up = [r for r in resistances if r["value"] > entry]
-    dn = [s for s in supports if s["value"] < entry]
-    return {"resistances": resistances, "supports": supports,
-            "nearest_resistance": up[0] if up else None,
-            "nearest_support": dn[0] if dn else None,
+    # A level's role depends on where price sits now, not on which daily
+    # bar it came from: a prior-day high the price has already broken
+    # above is support, not resistance (and a prior-day low above price
+    # is resistance). Classify by position vs the entry.
+    combined = resistances + supports
+    deduped = []
+    for lv in combined:
+        if any(abs(lv["value"] - o["value"]) / entry <= 0.001
+               for o in deduped):
+            continue
+        deduped.append(lv)
+    above = sorted([lv for lv in deduped if lv["value"] > entry],
+                   key=lambda r: r["value"])            # nearest above first
+    below = sorted([lv for lv in deduped if lv["value"] < entry],
+                   key=lambda s: s["value"], reverse=True)  # nearest below first
+    return {"resistances": above, "supports": below,
+            "nearest_resistance": above[0] if above else None,
+            "nearest_support": below[0] if below else None,
             "asof": completed.index[-1].date().isoformat()}
 
 
