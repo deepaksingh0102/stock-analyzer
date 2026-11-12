@@ -1036,10 +1036,16 @@ with tab_qqq:
     symbol_options_view("QQQ", use_demo, live, refresh_secs)
 
 # Build fingerprint: hash of this file at render time, so the deployed
-# build can be confirmed against the delivered file at a glance.
+# build can be confirmed against the delivered file at a glance. The
+# data.py hash rides along too — the footer proves app.py only, and a
+# stale data.py once shipped the old flow fetch under a new app.py
+# (Nov 12: 'str' object has no attribute 'get').
 try:
     import hashlib as _hashlib
+    import os as _os
     _digest = _hashlib.md5(open(__file__, "rb").read()).hexdigest()[:6]
-    st.caption(f"build 2026-11-12 · {_digest}")
+    _data_path = _os.path.join(_os.path.dirname(__file__), "data.py")
+    _data_digest = _hashlib.md5(open(_data_path, "rb").read()).hexdigest()[:6]
+    st.caption(f"build 2026-11-12 · {_digest} · data {_data_digest}")
 except Exception:
     pass
