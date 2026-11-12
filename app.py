@@ -870,17 +870,23 @@ def detail_view(use_demo: bool,
 
 
 # ---------------------------------------------------------------------------
-@st.fragment(run_every=refresh_secs if (live and market_open) else None)
+@st.fragment(run_every=refresh_secs if live else None)
 # ---------------------------------------------------------------------------
 # Tab 2: Top 10 stocks by options volume — expiring today
 # ---------------------------------------------------------------------------
 def options_volume_view(use_demo: bool, live: bool, refresh_secs: int):
     st.subheader("Top 10 Stocks by Options Volume — expiring today")
-    # A 50-symbol options scan is slow (one snapshots call per symbol),
-    # Same frozen-timer caveat as Chart & Signal (see detail_view): the
-    # fragment timer is set at page load, so after the close this runs
-    # from the snapshot instead of re-scanning the options chains.
-    # A manual "Refresh now" (refresh_nonce bump) invalidates it.
+    # A 50-symbol options scan is slow (one snapshots call per symbol).
+    # The fragment timer is set once, at page load — so run_every depends
+    # only on live tracking, NOT on whether the market was open at load:
+    # a session opened before the 9:30 AM open used to get run_every=None
+    # and never ticked all day (stale-since-morning, Nov 12). The fresh
+    # market check below decides, on every tick, whether to scan (open),
+    # render from the snapshot (closed, snapshot exists), or wait quietly
+    # (closed, no snapshot yet — e.g. loaded premarket). The scan itself
+    # is throttled by the 5-minute bucket, so ticks between buckets are
+    # cache hits, not new scans. A manual "Refresh now" (refresh_nonce
+    # bump) invalidates the snapshot.
     bucket = _bucket(live, refresh_secs, bucket_secs=300)
     closed_now = bool(live and not data.us_market_open())
     osnap = None
@@ -890,6 +896,15 @@ def options_volume_view(use_demo: bool, live: bool, refresh_secs: int):
                 osnap.get("date") != _today_et.isoformat()
                 or osnap.get("nonce") != st.session_state.get("refresh_nonce", 0)):
             osnap = None
+        if osnap is None:
+            # No snapshot yet and the market is closed (page loaded
+            # premarket, or a new day): don't burn a 50-symbol scan on
+            # empty chains — the timer ticks and the scan runs at the open.
+            st.caption("⏸ Live tracking on — the US market is closed, so the "
+                       "options ranking will refresh when the market opens "
+                       "(Mon–Fri, 9:30 AM–4:00 PM ET). Use 🔄 Refresh now "
+                       "for a manual update.")
+            return
     if osnap is not None:
         r, rows = osnap["r"], osnap["rows"]
     else:
@@ -948,6 +963,6 @@ with tab_opts:
 try:
     import hashlib as _hashlib
     _digest = _hashlib.md5(open(__file__, "rb").read()).hexdigest()[:6]
-    st.caption(f"build 2026-11-09 · {_digest}")
+    st.caption(f"build 2026-11-12 · {_digest}")
 except Exception:
     pass
