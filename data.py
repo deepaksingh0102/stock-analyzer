@@ -2511,9 +2511,9 @@ OPTIONS_NAMES = {
 
 
 # ---------------------------------------------------------------------------
-# Top options volume — expiring today (Stock Analyzer "Top Options Volume" tab)
+# One symbol's contracts expiring today (Stock Analyzer SPY/QQQ tabs),
+# plus the buy/sell flow estimate
 # ---------------------------------------------------------------------------
-# SPY/QQQ are included even though the analyzer is otherwise stocks-only:
 # 0DTE volume lives on the index ETFs, and single-stock 0DTE chains
 # mostly exist on Fridays (weekly expiry).
 TODAY_EXPIRY_UNIVERSE = ["SPY", "QQQ"] + OPTIONS_UNIVERSE
@@ -2521,13 +2521,15 @@ TODAY_EXPIRY_NAMES = {"SPY": "S&P 500 ETF", "QQQ": "Nasdaq-100 ETF",
                       **OPTIONS_NAMES}
 
 
-def today_expiry_ranking(top_contracts: int = 3) -> dict:
-    """Top 10 stocks by today's options volume — contracts expiring today
-    only (0DTE). One Alpaca options snapshots call per symbol, OPRA feed
-    first then the indicative feed, same pattern as the charting app's
-    PCR fetch. Each row carries its top `top_contracts` calls and puts
-    by today's volume, with strike, bid, ask, last, volume and OI.
-    Returns {"rows": [...], "source": ..., "asof": ...} or {"error": ...}."""
+def symbol_expiry_contracts(sym: str, top_contracts: int = 3) -> dict:
+    """One symbol's contracts expiring today (0DTE): total calls/puts
+    volume plus the top `top_contracts` calls and puts by today's volume,
+    each with its OCC contract symbol, strike, bid, ask, last, volume
+    and OI. One Alpaca options snapshots call (plus pagination), OPRA
+    feed first then the indicative feed — the same pattern as the
+    charting app's PCR fetch. Returns a ranking-style row dict
+    ({"Symbol", "Name", "Options volume", "Calls", "Puts", "P/C",
+    "top_calls", "top_puts", "source", "asof"}) or {"error": ...}."""
     import re
     import requests
     from datetime import datetime
@@ -2538,73 +2540,203 @@ def today_expiry_ranking(top_contracts: int = 3) -> dict:
     headers = _alpaca_headers()
     today = datetime.now(ZoneInfo("America/New_York")).date()
     occ = re.compile(r"^[A-Z]+(\d{6})([CP])(\d{8})$")
-    rows, feeds = [], set()
-    for sym in TODAY_EXPIRY_UNIVERSE:
-        contracts = []
-        for feed in ("opra", "indicative"):
-            try:
-                token, pages = None, 0
-                found = False
-                while pages < 20:
-                    params = {"feed": feed, "limit": 1000,
-                              "expiration_date_gte": today.isoformat(),
-                              "expiration_date_lte": today.isoformat()}
-                    if token:
-                        params["page_token"] = token
-                    r = requests.get(
-                        "https://data.alpaca.markets/v1beta1/options"
-                        f"/snapshots/{sym}", params=params, headers=headers,
-                        timeout=30)
-                    if r.status_code in (401, 403):
-                        break  # not entitled to this feed — try the next one
-                    r.raise_for_status()
-                    payload = r.json()
-                    for csym, snap in (payload.get("snapshots") or {}).items():
-                        m = occ.match(csym)
-                        if not m:
-                            continue
-                        vol = float((snap.get("dailyBar") or {}).get("v") or 0)
-                        if vol <= 0:
-                            continue
-                        contracts.append({
-                            "Type": "Put" if m.group(2) == "P" else "Call",
-                            "Strike": int(m.group(3)) / 1000,
-                            "Bid": (snap.get("latestQuote") or {}).get("bp"),
-                            "Ask": (snap.get("latestQuote") or {}).get("ap"),
-                            "Last": (snap.get("latestTrade") or {}).get("p")
-                                    or (snap.get("dailyBar") or {}).get("c"),
-                            "Volume": int(vol),
-                            "OI": int(snap.get("openInterest") or 0)})
-                        found = True
-                    token = payload.get("next_page_token")
-                    pages += 1
-                    if not token:
-                        break
-                if found:
-                    feeds.add(feed)
+    contracts, feed_used = [], None
+    for feed in ("opra", "indicative"):
+        try:
+            token, pages = None, 0
+            found = False
+            while pages < 20:
+                params = {"feed": feed, "limit": 1000,
+                          "expiration_date_gte": today.isoformat(),
+                          "expiration_date_lte": today.isoformat()}
+                if token:
+                    params["page_token"] = token
+                r = requests.get(
+                    "https://data.alpaca.markets/v1beta1/options"
+                    f"/snapshots/{sym}", params=params, headers=headers,
+                    timeout=30)
+                if r.status_code in (401, 403):
+                    break  # not entitled to this feed — try the next one
+                r.raise_for_status()
+                payload = r.json()
+                for csym, snap in (payload.get("snapshots") or {}).items():
+                    m = occ.match(csym)
+                    if not m:
+                        continue
+                    vol = float((snap.get("dailyBar") or {}).get("v") or 0)
+                    if vol <= 0:
+                        continue
+                    contracts.append({
+                        "Contract": csym,
+                        "Type": "Put" if m.group(2) == "P" else "Call",
+                        "Strike": int(m.group(3)) / 1000,
+                        "Bid": (snap.get("latestQuote") or {}).get("bp"),
+                        "Ask": (snap.get("latestQuote") or {}).get("ap"),
+                        "Last": (snap.get("latestTrade") or {}).get("p")
+                                or (snap.get("dailyBar") or {}).get("c"),
+                        "Volume": int(vol),
+                        "OI": int(snap.get("openInterest") or 0)})
+                    found = True
+                token = payload.get("next_page_token")
+                pages += 1
+                if not token:
                     break
-            except Exception:
-                continue
-        if not contracts:
+            if found:
+                feed_used = feed
+                break
+        except Exception:
             continue
-        calls = [c for c in contracts if c["Type"] == "Call"]
-        puts = [c for c in contracts if c["Type"] == "Put"]
-        cv = sum(c["Volume"] for c in calls)
-        pv = sum(c["Volume"] for c in puts)
-        calls.sort(key=lambda c: c["Volume"], reverse=True)
-        puts.sort(key=lambda c: c["Volume"], reverse=True)
-        rows.append({"Symbol": sym,
-                     "Name": TODAY_EXPIRY_NAMES.get(sym, sym),
-                     "Options volume": int(cv + pv),
-                     "Calls": int(cv), "Puts": int(pv),
-                     "P/C": round(pv / cv, 2) if cv else None,
-                     "top_calls": calls[:top_contracts],
-                     "top_puts": puts[:top_contracts]})
+    if not contracts:
+        return {"error": f"No {sym} contracts expiring today found — "
+                          "single-stock 0DTE chains mostly exist on "
+                          "Fridays; SPY/QQQ list every trading day."}
+    calls = [c for c in contracts if c["Type"] == "Call"]
+    puts = [c for c in contracts if c["Type"] == "Put"]
+    cv = sum(c["Volume"] for c in calls)
+    pv = sum(c["Volume"] for c in puts)
+    calls.sort(key=lambda c: c["Volume"], reverse=True)
+    puts.sort(key=lambda c: c["Volume"], reverse=True)
+    return {"Symbol": sym,
+            "Name": TODAY_EXPIRY_NAMES.get(sym, sym),
+            "Options volume": int(cv + pv),
+            "Calls": int(cv), "Puts": int(pv),
+            "P/C": round(pv / cv, 2) if cv else None,
+            "top_calls": calls[:top_contracts],
+            "top_puts": puts[:top_contracts],
+            "source": f"Alpaca ({feed_used})",
+            "asof": datetime.now(ZoneInfo("America/New_York"))
+                    .strftime("%H:%M")}
+
+
+# ---------------------------------------------------------------------------
+# Buy/sell flow for one options contract — tick-rule estimate
+# ---------------------------------------------------------------------------
+# Alpaca's snapshots carry total volume only — no bought/sold split.
+# The split has to be estimated trade by trade: /v1beta1/options/trades
+# returns every print (price, size, time) for a contract, but Alpaca
+# has NO historical options quotes endpoint, so the quote rule (trade
+# vs the live bid/ask) cannot be done — only the tick rule: a trade
+# above the previous trade's price is counted as a buy, below it as a
+# sell, unchanged carries the previous side forward, and the first
+# trade of the window is unclassified. It is an estimate, and it is
+# noisier on options than on stocks: spread legs and mid-price prints
+# misclassify. Never present it as the true bought/sold split.
+FLOW_MAX_TRADES = 1000  # most recent trades per contract
+
+
+def classify_trades_tick_rule(trades: list) -> dict:
+    """Tick-rule classification of a list of trades (ascending by time),
+    each {"p": price, "s": size}. Returns bought/sold volumes and counts,
+    the unclassified volume (first trade + flat prints with no prior
+    side), and the window's first/last trade times."""
+    buy_vol = sell_vol = buy_n = sell_n = unclass_vol = 0
+    prev_price, prev_side = None, None
+    for t in trades:
+        try:
+            p, s = float(t["p"]), int(t["s"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if prev_price is None:
+            unclass_vol += s
+        elif p > prev_price:
+            buy_vol += s
+            buy_n += 1
+            prev_side = 1
+        elif p < prev_price:
+            sell_vol += s
+            sell_n += 1
+            prev_side = -1
+        elif prev_side == 1:
+            buy_vol += s
+            buy_n += 1
+        elif prev_side == -1:
+            sell_vol += s
+            sell_n += 1
+        else:
+            unclass_vol += s
+        prev_price = p
+    first = trades[0].get("t") if trades else None
+    last = trades[-1].get("t") if trades else None
+    return {"buy_vol": int(buy_vol), "sell_vol": int(sell_vol),
+            "buy_n": int(buy_n), "sell_n": int(sell_n),
+            "unclass_vol": int(unclass_vol),
+            "n_trades": len(trades), "first": first, "last": last}
+
+
+def fetch_contract_trades(occ_symbol: str,
+                          max_trades: int = FLOW_MAX_TRADES) -> dict:
+    """The most recent `max_trades` trades for one OCC contract symbol,
+    from today's 9:30 AM ET open. One call (sort=desc, limit=max_trades);
+    the trades endpoint takes no feed parameter — it serves the
+    subscription's entitled feed. Returns {"trades": [...ascending...]}
+    or {"error": ...}."""
+    import requests
+    from datetime import datetime
+
+    if not alpaca_is_configured():
+        return {"error": "Alpaca options data is not configured "
+                          "(keys live in Streamlit Secrets)."}
+    headers = _alpaca_headers()
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    start = datetime(today.year, today.month, today.day, 9, 30,
+                     tzinfo=ZoneInfo("America/New_York")) \
+        .astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        r = requests.get(
+            "https://data.alpaca.markets/v1beta1/options/trades",
+            params={"symbols": occ_symbol, "limit": max_trades,
+                    "sort": "desc", "start": start},
+            headers=headers, timeout=30)
+        if r.status_code in (401, 403):
+            return {"error": "Not entitled to options trade data on this "
+                              "Alpaca plan."}
+        r.raise_for_status()
+        trades = (r.json().get("trades") or [])
+        trades = sorted(trades, key=lambda t: t.get("t") or "")
+        return {"trades": trades}
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
+def contract_flow(occ_symbol: str,
+                  max_trades: int = FLOW_MAX_TRADES) -> dict:
+    """Buy/sell flow estimate for one OCC contract: the most recent
+    `max_trades` trades classified by the tick rule. Returns the
+    classifier's dict plus {"occ", "method": "tick rule"} or
+    {"error": ...}. Read the module header: this is an estimate, not
+    the true bought/sold split."""
+    res = fetch_contract_trades(occ_symbol, max_trades)
+    if "error" in res:
+        return res
+    out = classify_trades_tick_rule(res["trades"])
+    out["occ"] = occ_symbol
+    out["method"] = "tick rule"
+    out["max_trades"] = max_trades
+    return out
+
+
+def today_expiry_ranking(top_contracts: int = 3) -> dict:
+    """Top 10 stocks by today's options volume — contracts expiring today
+    only (0DTE). One Alpaca options snapshots call per symbol, OPRA feed
+    first then the indicative feed, same pattern as the charting app's
+    PCR fetch. Each row carries its top `top_contracts` calls and puts
+    by today's volume, with strike, bid, ask, last, volume and OI.
+    Returns {"rows": [...], "source": ..., "asof": ...} or {"error": ...}."""
+    from datetime import datetime
+
+    rows = []
+    for sym in TODAY_EXPIRY_UNIVERSE:
+        row = symbol_expiry_contracts(sym, top_contracts)
+        if "error" in row:
+            continue
+        rows.append(row)
     if not rows:
         return {"error": "No options expiring today found — single-stock "
                           "0DTE chains mostly exist on Fridays; SPY/QQQ "
                           "list every trading day."}
     rows.sort(key=lambda r: r["Options volume"], reverse=True)
-    feed_label = feeds.pop() if len(feeds) == 1 else "mixed feeds"
-    return {"rows": rows[:10], "source": f"Alpaca ({feed_label})",
+    sources = {row["source"] for row in rows}
+    source_label = sources.pop() if len(sources) == 1 \
+        else "Alpaca (mixed feeds)"
+    return {"rows": rows[:10], "source": source_label,
             "asof": datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M")}

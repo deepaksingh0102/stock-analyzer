@@ -102,13 +102,26 @@ def load_trades(symbol: str, use_demo: bool, bucket: int = 0):
 
 
 @st.cache_data(ttl=600, max_entries=32, show_spinner=False)
-def load_options_ranking(use_demo: bool, bucket: int = 0):
-    """Top-10 options-volume ranking, expiry today. {"error": msg} on failure."""
+def load_symbol_chain(sym: str, use_demo: bool, bucket: int = 0):
+    """One symbol's contracts expiring today. {"error": msg} on failure."""
     if use_demo:
-        return {"error": "Demo mode is offline — the options ranking needs "
+        return {"error": "Demo mode is offline — the options chain needs "
                           "live Alpaca options data."}
     try:
-        return data.today_expiry_ranking()
+        return data.symbol_expiry_contracts(sym)
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
+@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
+def load_contract_flow(occ: str, use_demo: bool, bucket: int = 0):
+    """Buy/sell flow estimate for one OCC contract (tick rule on the most
+    recent 1,000 trades). {"error": msg} on failure."""
+    if use_demo:
+        return {"error": "Demo mode is offline — the buy/sell flow needs "
+                          "live Alpaca options data."}
+    try:
+        return data.contract_flow(occ)
     except Exception as exc:
         return {"error": str(exc)[:200]}
 
@@ -196,7 +209,7 @@ with st.sidebar:
              "Chart & Signal tab: the chart, verdict, radar and "
              "forecast are computed as of that session's close, from "
              "that session's bars alone. The live quote, tape checks "
-             "and auto-refresh pause in replay; Top Options Volume stays live. Alpaca replays go back years; a "
+             "and auto-refresh pause in replay; the SPY and QQQ tabs stay live. Alpaca replays go back years; a "
              "Yahoo-only setup can only replay about the last 30 days "
              "of 1-minute bars.")
     past_mode = bool(view_date) and view_date < _today_et
@@ -214,8 +227,8 @@ with st.sidebar:
 
 
 st.title("📈 Stock Analyzer")
-tab_detail, tab_opts = st.tabs(
-    ["Chart & Signal", "Top Options Volume"])
+tab_detail, tab_spy, tab_qqq = st.tabs(
+    ["Chart & Signal", "SPY", "QQQ"])
 
 
 def _thresholds():
@@ -258,7 +271,7 @@ def detail_view(use_demo: bool,
     if past_mode:
         st.caption(f"📅 Replay — viewing the {view_date} session as of "
                    "its close. Live quote, tape checks and auto-refresh "
-                   "are paused; Top Options Volume stays live.")
+                   "are paused; the SPY and QQQ tabs stay live.")
     elif live and open_now:
         st.caption(f"🟢 Live tracking on — refreshing every {refresh_secs}s · "
                    f"last updated {_now_et().strftime('%H:%M:%S')} ET · "
@@ -872,11 +885,11 @@ def detail_view(use_demo: bool,
 # ---------------------------------------------------------------------------
 @st.fragment(run_every=refresh_secs if live else None)
 # ---------------------------------------------------------------------------
-# Tab 2: Top 10 stocks by options volume — expiring today
+# SPY / QQQ tabs: one symbol's contracts expiring today (0DTE) + an
+# on-demand buy/sell flow estimate
 # ---------------------------------------------------------------------------
-def options_volume_view(use_demo: bool, live: bool, refresh_secs: int):
-    st.subheader("Top 10 Stocks by Options Volume — expiring today")
-    # A 50-symbol options scan is slow (one snapshots call per symbol).
+def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int):
+    st.subheader(f"{sym} — contracts expiring today")
     # The fragment timer is set once, at page load — so run_every depends
     # only on live tracking, NOT on whether the market was open at load:
     # a session opened before the 9:30 AM open used to get run_every=None
@@ -889,74 +902,131 @@ def options_volume_view(use_demo: bool, live: bool, refresh_secs: int):
     # bump) invalidates the snapshot.
     bucket = _bucket(live, refresh_secs, bucket_secs=300)
     closed_now = bool(live and not data.us_market_open())
-    osnap = None
+    snap_key = f"sym_snap_{sym}"
+    snap = None
     if closed_now:
-        osnap = st.session_state.get("options_snap")
-        if osnap is not None and (
-                osnap.get("date") != _today_et.isoformat()
-                or osnap.get("nonce") != st.session_state.get("refresh_nonce", 0)):
-            osnap = None
-        if osnap is None:
+        snap = st.session_state.get(snap_key)
+        if snap is not None and (
+                snap.get("date") != _today_et.isoformat()
+                or snap.get("nonce") != st.session_state.get("refresh_nonce", 0)):
+            snap = None
+        if snap is None:
             # No snapshot yet and the market is closed (page loaded
-            # premarket, or a new day): don't burn a 50-symbol scan on
-            # empty chains — the timer ticks and the scan runs at the open.
+            # premarket, or a new day): don't burn a chain scan on empty
+            # chains — the timer ticks and the scan runs at the open.
             st.caption("⏸ Live tracking on — the US market is closed, so the "
-                       "options ranking will refresh when the market opens "
+                       f"{sym} contracts will refresh when the market opens "
                        "(Mon–Fri, 9:30 AM–4:00 PM ET). Use 🔄 Refresh now "
                        "for a manual update.")
             return
-    if osnap is not None:
-        r, rows = osnap["r"], osnap["rows"]
+    if snap is not None:
+        row, flow = snap["row"], snap.get("flow")
+        price, chg = snap.get("price"), snap.get("chg")
     else:
-        with st.spinner("Scanning today's expiry chains… (first scan can take up to a minute)"):
-            r = load_options_ranking(use_demo, bucket)
-        if r.get("error"):
-            st.error(f"Could not load options ranking: {r['error']}")
+        with st.spinner(f"Loading {sym} contracts expiring today…"):
+            row = load_symbol_chain(sym, use_demo, bucket)
+        if row.get("error"):
+            st.error(f"Could not load {sym} contracts: {row['error']}")
             st.caption("This tab needs Alpaca options data (keys in Streamlit Secrets).")
             return
-        rows = []
-        for row in r["rows"][:10]:
-            sym = row["Symbol"]
-            try:
-                df = load_daily(sym, use_demo, bucket)
-                s = data.summary(df)
-                price, chg = round(s["price"], 2), round(s["change_pct"], 2)
-            except Exception:
-                price, chg = None, None
-            rows.append({"#": len(rows) + 1, "Symbol": sym, "Company": row["Name"],
-                         "Options volume": row["Options volume"],
-                         "Calls": row["Calls"], "Puts": row["Puts"], "P/C": row["P/C"],
-                         "Price": price, "Change %": chg})
-        st.session_state["options_snap"] = {
+        flow = None
+        # The price rides in the snapshot too: after close this tab must
+        # make zero new fetches, and a load_daily here would refetch on
+        # every tick.
+        try:
+            df = load_daily(sym, use_demo, bucket)
+            s = data.summary(df)
+            price, chg = round(s["price"], 2), round(s["change_pct"], 2)
+        except Exception:
+            price, chg = None, None
+        st.session_state[snap_key] = {
             "date": _today_et.isoformat(),
             "nonce": st.session_state.get("refresh_nonce", 0),
-            "r": r, "rows": rows}
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-    st.caption(f"As of {r['asof']} ET · source: {r['source']} · contracts "
-               "expiring today only, ranked across a 50-name liquid "
-               "universe plus SPY/QQQ (0DTE volume lives on the index "
-               "ETFs; single-stock 0DTE chains mostly exist on Fridays). "
-               "A full-market scan is too slow for the app's refresh loop.")
-    st.caption("Tip: type any of these symbols in the sidebar search to see its chart.")
+            "row": row, "flow": None, "price": price, "chg": chg}
+    price_txt = f"${price:,.2f} ({chg:+.2f}%) · " if price is not None else ""
+    st.caption(f"{sym} {price_txt}{row['Options volume']:,} contracts "
+               f"expiring today · calls {row['Calls']:,} / puts {row['Puts']:,} "
+               f"(P/C {row['P/C']}) · as of {row['asof']} ET · source: {row['source']}")
+    contracts = sorted(row["top_calls"] + row["top_puts"],
+                       key=lambda c: c["Volume"], reverse=True)
+    # On-demand buy/sell flow: the snapshot feed carries total volume
+    # only, and Alpaca has no historical options quotes, so the split is
+    # a tick-rule estimate on the most recent 1,000 trades per contract.
+    # A button, not a refresh-loop fetch: the flow is loaded through the
+    # 5-minute bucket cache when asked for, and stored in the session
+    # snapshot so after-close ticks serve it without refetching.
+    show_flow = st.session_state.get(f"flow_{sym}", False)
+    label = "Hide buy/sell flow" if show_flow else "🔍 Show buy/sell flow"
+    if st.button(label, key=f"flow_btn_{sym}"):
+        show_flow = not show_flow
+        st.session_state[f"flow_{sym}"] = show_flow
+    if show_flow:
+        if closed_now and snap is not None and snap.get("flow") is not None:
+            flow = snap["flow"]
+        else:
+            # Market open (bucket cache), or closed with no snapshot flow
+            # yet — an explicit button press, so one fetch is fine.
+            with st.spinner("Classifying recent trades… (tick rule)"):
+                flow = {c["Contract"]: load_contract_flow(
+                    c["Contract"], use_demo, bucket) for c in contracts}
+            snap2 = st.session_state.get(snap_key)
+            if snap2 is not None:
+                snap2["flow"] = flow
+                st.session_state[snap_key] = snap2
+    table = []
+    for c in contracts:
+        d = dict(c)
+        if show_flow and flow:
+            f = flow.get(c["Contract"]) or {}
+            if "error" in f:
+                d["Buy Vol"] = d["Sell Vol"] = d["Net"] = "—"
+            else:
+                d["Buy Vol"] = f.get("buy_vol")
+                d["Sell Vol"] = f.get("sell_vol")
+                d["Net"] = f.get("buy_vol", 0) - f.get("sell_vol", 0)
+        table.append(d)
+    st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
+    if show_flow and flow:
+        def _totals(contracts_of_type):
+            b = s = 0
+            for c in contracts_of_type:
+                f = flow.get(c["Contract"]) or {}
+                if "error" in f:
+                    continue
+                b += f.get("buy_vol", 0)
+                s += f.get("sell_vol", 0)
+            return b, s
 
-    # Top contracts expiring today, per stock: strike, bid and ask.
-    st.subheader("Top contracts expiring today — strike, bid & ask")
-    for row in r["rows"][:10]:
-        sym = row["Symbol"]
-        contracts = sorted(row["top_calls"] + row["top_puts"],
-                           key=lambda c: c["Volume"], reverse=True)
-        if not contracts:
-            continue
-        with st.expander(f"{sym} — top {len(contracts)} contracts expiring "
-                         f"today ({row['Options volume']:,} contracts total)"):
-            st.dataframe(pd.DataFrame(contracts),
-                         hide_index=True, use_container_width=True)
+        any_flow = any("error" not in (flow.get(c["Contract"]) or {})
+                       for c in contracts)
+        if any_flow:
+            cb, cs = _totals(row["top_calls"])
+            pb, ps = _totals(row["top_puts"])
+            st.caption(f"Top contracts — calls: bought {cb:,} / sold {cs:,} "
+                       f"(net {cb - cs:+,}) · puts: bought {pb:,} / sold {ps:,} "
+                       f"(net {pb - ps:+,}).")
+            st.caption("Buy/sell is a tick-rule estimate on the most recent "
+                       "1,000 trades per contract (Alpaca has no historical "
+                       "options quotes, so the quote rule can't be used). "
+                       "Spread legs and mid-price prints can misclassify — "
+                       "treat it as flow context, not a signal. The OI "
+                       "column reads 0 when the Alpaca snapshot feed "
+                       "returns no open interest for these contracts.")
+        else:
+            st.caption("Buy/sell flow unavailable — the trades fetch failed "
+                       "for these contracts.")
+    else:
+        st.caption("Tip: 🔍 Show buy/sell flow classifies the most recent "
+                   "1,000 trades per contract (tick rule) — an estimate, "
+                   "not the true bought/sold split.")
 
 
 with tab_detail:
     detail_view(use_demo, live, refresh_secs, chart_tf, view_date, past_mode)
-with tab_opts:
-    options_volume_view(use_demo, live, refresh_secs)
+with tab_spy:
+    symbol_options_view("SPY", use_demo, live, refresh_secs)
+with tab_qqq:
+    symbol_options_view("QQQ", use_demo, live, refresh_secs)
 
 # Build fingerprint: hash of this file at render time, so the deployed
 # build can be confirmed against the delivered file at a glance.
