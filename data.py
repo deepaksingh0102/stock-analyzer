@@ -2691,7 +2691,21 @@ def fetch_contract_trades(occ_symbol: str,
             return {"error": "Not entitled to options trade data on this "
                               "Alpaca plan."}
         r.raise_for_status()
-        trades = (r.json().get("trades") or [])
+        payload = r.json()
+        raw = payload.get("trades")
+        if isinstance(raw, dict):
+            # Multi-symbol responses group trades by contract symbol
+            # (the same convention as Alpaca's stocks endpoints) — take
+            # ours, or flatten all groups if the key differs.
+            trades = raw.get(occ_symbol)
+            if trades is None:
+                trades = [t for v in raw.values()
+                          if isinstance(v, list) for t in v]
+        elif isinstance(raw, list):
+            trades = raw
+        else:
+            trades = []
+        trades = [t for t in trades if isinstance(t, dict)]
         trades = sorted(trades, key=lambda t: t.get("t") or "")
         return {"trades": trades}
     except Exception as exc:

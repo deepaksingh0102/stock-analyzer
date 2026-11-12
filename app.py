@@ -1013,8 +1013,15 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
                        "column reads 0 when the Alpaca snapshot feed "
                        "returns no open interest for these contracts.")
         else:
-            st.caption("Buy/sell flow unavailable — the trades fetch failed "
-                       "for these contracts.")
+            # Surface the real error so a failed fetch is diagnosable
+            # from the screenshot (status / reason), not just "—".
+            errs = {(flow.get(c["Contract"]) or {}).get("error")
+                    for c in contracts}
+            errs.discard(None)
+            detail = next(iter(errs), "unknown error") if errs else \
+                "unknown error"
+            st.caption("Buy/sell flow unavailable — the trades fetch "
+                       f"failed for these contracts ({str(detail)[:120]}).")
     else:
         st.caption("Tip: 🔍 Show buy/sell flow classifies the most recent "
                    "1,000 trades per contract (tick rule) — an estimate, "
