@@ -191,3 +191,31 @@ def forecast_figure(fc: dict) -> go.Figure:
                       xaxis=dict(range=[0, 100], title="Probability %"),
                       showlegend=False)
     return fig
+
+
+def flow_buysell_figure(calls_buy: int, calls_sell: int,
+                        puts_buy: int, puts_sell: int) -> go.Figure:
+    """Grouped buy-vs-sell bars for the top contracts expiring today:
+    bought (green) vs sold (red) for calls and puts, with the net on
+    each pair in the title. A standalone figure — no shared axes with
+    the price panels, so no axis-name collision is possible."""
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=["Calls", "Puts"], y=[calls_buy, puts_buy], name="Bought",
+        marker_color="#16a34a",
+        text=[f"{calls_buy:,}", f"{puts_buy:,}"],
+        textposition="outside"))
+    fig.add_trace(go.Bar(
+        x=["Calls", "Puts"], y=[calls_sell, puts_sell], name="Sold",
+        marker_color="#dc2626",
+        text=[f"{calls_sell:,}", f"{puts_sell:,}"],
+        textposition="outside"))
+    fig.update_layout(
+        barmode="group", height=280,
+        margin=dict(l=10, r=10, t=40, b=10),
+        title=(f"Buy vs sell — calls net {calls_buy - calls_sell:+,} · "
+               f"puts net {puts_buy - puts_sell:+,}"),
+        yaxis=dict(title="Contracts"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1))
+    return fig

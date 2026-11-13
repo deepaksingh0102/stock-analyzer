@@ -2621,7 +2621,14 @@ def symbol_expiry_contracts(sym: str, top_contracts: int = 3) -> dict:
 # trade of the window is unclassified. It is an estimate, and it is
 # noisier on options than on stocks: spread legs and mid-price prints
 # misclassify. Never present it as the true bought/sold split.
-FLOW_MAX_TRADES = 1000  # most recent trades per contract
+# Coverage: the flow classifies ALL of today's trades per contract
+# (paginated, limit 10,000/page, from the 9:30 AM ET open) — the
+# earlier build only saw the most recent 1,000, about 7-10% of the
+# top contracts' volume. Full coverage removes the sampling gap; it
+# does not fix the tick rule's misclassification.
+FLOW_MAX_TRADES = 1000  # most recent trades per contract (windowed fetch)
+FLOW_PAGE_LIMIT = 10000  # trades per page (Alpaca max per request)
+FLOW_MAX_PAGES = 10  # safety cap: 100,000 trades per contract per day
 
 
 def classify_trades_tick_rule(trades: list) -> dict:
@@ -2712,21 +2719,125 @@ def fetch_contract_trades(occ_symbol: str,
         return {"error": str(exc)[:200]}
 
 
+def fetch_contract_trades_all(occ_symbol: str,
+                              max_pages: int = FLOW_MAX_PAGES) -> dict:
+    """ALL of today's trades for one OCC contract symbol, from the
+    9:30 AM ET open — paginated (limit=10,000/page, sort=asc,
+    following next_page_token) until the token runs out or `max_pages`
+    is reached. Returns {"trades": [...ascending...], "pages": n,
+    "truncated": bool} or {"error": ...}. The trades endpoint takes no
+    feed parameter — it serves the subscription's entitled feed."""
+    import requests
+    from datetime import datetime
+
+    if not alpaca_is_configured():
+        return {"error": "Alpaca options data is not configured "
+                          "(keys live in Streamlit Secrets)."}
+    headers = _alpaca_headers()
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    start = datetime(today.year, today.month, today.day, 9, 30,
+                     tzinfo=ZoneInfo("America/New_York")) \
+        .astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+    trades, token, pages = [], None, 0
+    try:
+        while pages < max_pages:
+            params = {"symbols": occ_symbol, "limit": FLOW_PAGE_LIMIT,
+                      "sort": "asc", "start": start}
+            if token:
+                params["page_token"] = token
+            r = requests.get(
+                "https://data.alpaca.markets/v1beta1/options/trades",
+                params=params, headers=headers, timeout=30)
+            if r.status_code in (401, 403):
+                return {"error": "Not entitled to options trade data on "
+                                  "this Alpaca plan."}
+            r.raise_for_status()
+            payload = r.json()
+            raw = payload.get("trades")
+            if isinstance(raw, dict):
+                page = raw.get(occ_symbol)
+                if page is None:
+                    page = [t for v in raw.values()
+                            if isinstance(v, list) for t in v]
+            elif isinstance(raw, list):
+                page = raw
+            else:
+                page = []
+            trades.extend(t for t in page if isinstance(t, dict))
+            token = payload.get("next_page_token")
+            pages += 1
+            if not token:
+                break
+        trades = sorted(trades, key=lambda t: t.get("t") or "")
+        return {"trades": trades, "pages": pages,
+                "truncated": bool(token)}
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
 def contract_flow(occ_symbol: str,
-                  max_trades: int = FLOW_MAX_TRADES) -> dict:
-    """Buy/sell flow estimate for one OCC contract: the most recent
-    `max_trades` trades classified by the tick rule. Returns the
-    classifier's dict plus {"occ", "method": "tick rule"} or
+                  max_trades: int | None = None) -> dict:
+    """Buy/sell flow estimate for one OCC contract, classified by the
+    tick rule. Default (max_trades=None): ALL of today's trades, from
+    the 9:30 AM ET open, paginated. Pass max_trades for the old
+    most-recent-N window instead. Returns the classifier's dict plus
+    {"occ", "method": "tick rule", "pages", "truncated"} or
     {"error": ...}. Read the module header: this is an estimate, not
     the true bought/sold split."""
-    res = fetch_contract_trades(occ_symbol, max_trades)
+    if max_trades is None:
+        res = fetch_contract_trades_all(occ_symbol)
+    else:
+        res = fetch_contract_trades(occ_symbol, max_trades)
     if "error" in res:
         return res
     out = classify_trades_tick_rule(res["trades"])
     out["occ"] = occ_symbol
     out["method"] = "tick rule"
+    out["pages"] = res.get("pages", 1)
+    out["truncated"] = res.get("truncated", False)
     out["max_trades"] = max_trades
     return out
+
+
+def flow_direction(calls_buy: int, calls_sell: int,
+                   puts_buy: int, puts_sell: int) -> dict:
+    """Directional read from the top contracts' bought/sold split —
+    the desk rule: puts bought more than sold AND calls bought less
+    than sold is bearish; the mirror is bullish; anything else is
+    mixed/neutral. Returns {"signal": "Bearish"|"Bullish"|"Neutral",
+    "detail": ..., "call_ratio": buy/sell or None,
+    "put_ratio": buy/sell or None}. A ratio is None when its sell side
+    is zero (no trades to divide by)."""
+    def _ratio(b, s):
+        return round(b / s, 2) if s else None
+    put_bear = puts_buy > puts_sell
+    call_bear = calls_buy < calls_sell
+    put_bull = puts_buy < puts_sell
+    call_bull = calls_buy > calls_sell
+    if put_bear and call_bear:
+        signal = "Bearish"
+        detail = ("puts bought more than sold (bearish) and calls "
+                  "bought less than sold (bearish)")
+    elif put_bull and call_bull:
+        signal = "Bullish"
+        detail = ("puts bought less than sold (bullish) and calls "
+                  "bought more than sold (bullish)")
+    else:
+        signal = "Neutral"
+        sides = []
+        if put_bear:
+            sides.append("puts bearish")
+        elif put_bull:
+            sides.append("puts bullish")
+        if call_bear:
+            sides.append("calls bearish")
+        elif call_bull:
+            sides.append("calls bullish")
+        detail = "mixed — " + (", ".join(sides) if sides
+                                else "no lean on either side")
+    return {"signal": signal, "detail": detail,
+            "call_ratio": _ratio(calls_buy, calls_sell),
+            "put_ratio": _ratio(puts_buy, puts_sell)}
 
 
 def today_expiry_ranking(top_contracts: int = 3) -> dict:

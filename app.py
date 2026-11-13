@@ -15,7 +15,7 @@ import streamlit as st
 import config
 import data
 import signals
-from charts import intraday_chart, radar_history_figure, forecast_figure
+from charts import intraday_chart, radar_history_figure, forecast_figure, flow_buysell_figure
 
 # Streamlit Cloud secrets (App Settings → Secrets) override config.py,
 # so real API keys never have to be committed to the repo.
@@ -115,8 +115,8 @@ def load_symbol_chain(sym: str, use_demo: bool, bucket: int = 0):
 
 @st.cache_data(ttl=600, max_entries=32, show_spinner=False)
 def load_contract_flow(occ: str, use_demo: bool, bucket: int = 0):
-    """Buy/sell flow estimate for one OCC contract (tick rule on the most
-    recent 1,000 trades). {"error": msg} on failure."""
+    """Buy/sell flow estimate for one OCC contract (tick rule on ALL of
+    today's trades, paginated). {"error": msg} on failure."""
     if use_demo:
         return {"error": "Demo mode is offline — the buy/sell flow needs "
                           "live Alpaca options data."}
@@ -951,7 +951,8 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
                        key=lambda c: c["Volume"], reverse=True)
     # On-demand buy/sell flow: the snapshot feed carries total volume
     # only, and Alpaca has no historical options quotes, so the split is
-    # a tick-rule estimate on the most recent 1,000 trades per contract.
+    # a tick-rule estimate on ALL of today's trades per contract
+    # (paginated, limit 10,000/page, from the 9:30 AM ET open).
     # A button, not a refresh-loop fetch: the flow is loaded through the
     # 5-minute bucket cache when asked for, and stored in the session
     # snapshot so after-close ticks serve it without refetching.
@@ -1005,13 +1006,42 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
             st.caption(f"Top contracts — calls: bought {cb:,} / sold {cs:,} "
                        f"(net {cb - cs:+,}) · puts: bought {pb:,} / sold {ps:,} "
                        f"(net {pb - ps:+,}).")
-            st.caption("Buy/sell is a tick-rule estimate on the most recent "
-                       "1,000 trades per contract (Alpaca has no historical "
-                       "options quotes, so the quote rule can't be used). "
-                       "Spread legs and mid-price prints can misclassify — "
-                       "treat it as flow context, not a signal. The OI "
-                       "column reads 0 when the Alpaca snapshot feed "
-                       "returns no open interest for these contracts.")
+            # Directional read (desk rule) + buy-vs-sell chart. The
+            # signal is a flow read on today's top contracts, not a
+            # prediction — the same tier-6 context as the table.
+            sig = data.flow_direction(cb, cs, pb, ps)
+            pr = sig["put_ratio"]
+            cr = sig["call_ratio"]
+            pr_txt = f"{pr:.2f}" if pr is not None else "—"
+            cr_txt = f"{cr:.2f}" if cr is not None else "—"
+            st.markdown(f"**Flow read: {sig['signal']}** — {sig['detail']}. "
+                        f"Put buy/sell {pr_txt} · call buy/sell {cr_txt}.")
+            st.plotly_chart(flow_buysell_figure(cb, cs, pb, ps),
+                            use_container_width=True)
+            # Coverage: how much of the top contracts' day volume the
+            # classification actually saw (full day now, not the last
+            # 1,000 trades).
+            good = [flow.get(c["Contract"]) or {} for c in contracts
+                    if "error" not in (flow.get(c["Contract"]) or {})]
+            n_trades = sum(f.get("n_trades", 0) for f in good)
+            seen_vol = sum(f.get("buy_vol", 0) + f.get("sell_vol", 0)
+                           + f.get("unclass_vol", 0) for f in good)
+            day_vol = sum(c["Volume"] for c in contracts)
+            cov = f"{seen_vol / day_vol:.0%}" if day_vol else "—"
+            trunc = any(f.get("truncated") for f in good)
+            st.caption(f"Full-day flow: {n_trades:,} trades classified, "
+                       f"covering {seen_vol:,} of {day_vol:,} contracts "
+                       f"({cov} of the top-6 volume)"
+                       + (" — capped at 100,000 trades per contract; "
+                          "the tail is unclassified." if trunc else "."))
+            st.caption("Buy/sell is a tick-rule estimate on ALL of "
+                       "today's trades per contract (Alpaca has no "
+                       "historical options quotes, so the quote rule "
+                       "can't be used). Spread legs and mid-price prints "
+                       "can misclassify — treat it as flow context, not "
+                       "a signal. The OI column reads 0 when the Alpaca "
+                       "snapshot feed returns no open interest for these "
+                       "contracts.")
         else:
             # Surface the real error so a failed fetch is diagnosable
             # from the screenshot (status / reason), not just "—".
@@ -1023,9 +1053,10 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
             st.caption("Buy/sell flow unavailable — the trades fetch "
                        f"failed for these contracts ({str(detail)[:120]}).")
     else:
-        st.caption("Tip: 🔍 Show buy/sell flow classifies the most recent "
-                   "1,000 trades per contract (tick rule) — an estimate, "
-                   "not the true bought/sold split.")
+        st.caption("Tip: 🔍 Show buy/sell flow classifies ALL of today's "
+                   "trades per contract (tick rule) — an estimate, not "
+                   "the true bought/sold split — and shows the put/call "
+                   "buy-vs-sell chart with a directional read.")
 
 
 with tab_detail:
@@ -1046,6 +1077,10 @@ try:
     _digest = _hashlib.md5(open(__file__, "rb").read()).hexdigest()[:6]
     _data_path = _os.path.join(_os.path.dirname(__file__), "data.py")
     _data_digest = _hashlib.md5(open(_data_path, "rb").read()).hexdigest()[:6]
-    st.caption(f"build 2026-11-12 · {_digest} · data {_data_digest}")
+    _charts_path = _os.path.join(_os.path.dirname(__file__), "charts.py")
+    _charts_digest = _hashlib.md5(open(_charts_path, "rb").read()) \
+        .hexdigest()[:6]
+    st.caption(f"build 2026-11-13 · {_digest} · data {_data_digest} · "
+               f"charts {_charts_digest}")
 except Exception:
     pass
