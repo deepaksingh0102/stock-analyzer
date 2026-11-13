@@ -15,7 +15,8 @@ import streamlit as st
 import config
 import data
 import signals
-from charts import intraday_chart, radar_history_figure, forecast_figure, flow_buysell_figure
+from charts import (intraday_chart, radar_history_figure, forecast_figure,
+                    flow_buysell_figure, flow_net_compare_figure)
 
 # Streamlit Cloud secrets (App Settings → Secrets) override config.py,
 # so real API keys never have to be committed to the repo.
@@ -882,12 +883,28 @@ def detail_view(use_demo: bool,
                          else " · live tracking paused (market closed)"))))
 
 
+def _contract_signal(is_call: bool, net) -> str:
+    """Per-contract flow signal from the tick-rule net (bought − sold).
+
+    Calls bought more than sold is bullish; puts bought more than sold
+    is bearish; the mirror images flip. A zero net is Neutral; a missing
+    net ("—") stays "—". The same desk rule as data.flow_direction,
+    applied one contract at a time.
+    """
+    if net is None or isinstance(net, str):
+        return "—"
+    if net == 0:
+        return "Neutral"
+    if is_call:
+        return "Bullish" if net > 0 else "Bearish"
+    return "Bearish" if net > 0 else "Bullish"
+
+
 # ---------------------------------------------------------------------------
 @st.fragment(run_every=refresh_secs if live else None)
 # ---------------------------------------------------------------------------
 # SPY / QQQ tabs: one symbol's contracts expiring today (0DTE) + an
 # on-demand buy/sell flow estimate
-# ---------------------------------------------------------------------------
 def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int):
     st.subheader(f"{sym} — contracts expiring today")
     # The fragment timer is set once, at page load — so run_every depends
@@ -962,11 +979,15 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
         show_flow = not show_flow
         st.session_state[f"flow_{sym}"] = show_flow
     if show_flow:
+        flow_fresh = False  # True only when the flow was just fetched,
+        # not served from the snapshot — the previous-vs-latest history
+        # records real readings only, never a replayed snapshot.
         if closed_now and snap is not None and snap.get("flow") is not None:
             flow = snap["flow"]
         else:
             # Market open (bucket cache), or closed with no snapshot flow
             # yet — an explicit button press, so one fetch is fine.
+            flow_fresh = True
             with st.spinner("Classifying recent trades… (tick rule)"):
                 flow = {c["Contract"]: load_contract_flow(
                     c["Contract"], use_demo, bucket) for c in contracts}
@@ -974,6 +995,7 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
             if snap2 is not None:
                 snap2["flow"] = flow
                 st.session_state[snap_key] = snap2
+    call_syms = {c["Contract"] for c in row["top_calls"]}
     table = []
     for c in contracts:
         d = dict(c)
@@ -981,10 +1003,13 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
             f = flow.get(c["Contract"]) or {}
             if "error" in f:
                 d["Buy Vol"] = d["Sell Vol"] = d["Net"] = "—"
+                d["Signal"] = "—"
             else:
                 d["Buy Vol"] = f.get("buy_vol")
                 d["Sell Vol"] = f.get("sell_vol")
                 d["Net"] = f.get("buy_vol", 0) - f.get("sell_vol", 0)
+                d["Signal"] = _contract_signal(
+                    c["Contract"] in call_syms, d["Net"])
         table.append(d)
     st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
     if show_flow and flow:
@@ -1003,6 +1028,15 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
         if any_flow:
             cb, cs = _totals(row["top_calls"])
             pb, ps = _totals(row["top_puts"])
+            # Previous-vs-latest history: one entry per 5-minute bucket,
+            # last two readings only, fresh fetches only (a snapshot
+            # replay after close is not a new reading).
+            if flow_fresh:
+                hist = st.session_state.setdefault(f"flow_hist_{sym}", [])
+                if not hist or hist[-1]["bucket"] != bucket:
+                    hist.append({"bucket": bucket, "calls_net": cb - cs,
+                                 "puts_net": pb - ps})
+                    del hist[:-2]
             st.caption(f"Top contracts — calls: bought {cb:,} / sold {cs:,} "
                        f"(net {cb - cs:+,}) · puts: bought {pb:,} / sold {ps:,} "
                        f"(net {pb - ps:+,}).")
@@ -1042,6 +1076,33 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
                        "a signal. The OI column reads 0 when the Alpaca "
                        "snapshot feed returns no open interest for these "
                        "contracts.")
+            # Previous-vs-latest net-flow chart: one pair of bars per
+            # group — SPY calls/puts, then QQQ calls/puts when that
+            # symbol's flow has been fetched too. A group with only one
+            # reading so far shows its Latest bar only.
+            labels, prev_nets, latest_nets = [], [], []
+            for s in ("SPY", "QQQ"):
+                h = st.session_state.get(f"flow_hist_{s}", [])
+                if not h:
+                    continue
+                labels += [f"{s} calls", f"{s} puts"]
+                latest_nets += [h[-1]["calls_net"], h[-1]["puts_net"]]
+                if len(h) >= 2:
+                    prev_nets += [h[-2]["calls_net"], h[-2]["puts_net"]]
+                else:
+                    prev_nets += [None, None]
+            if labels:
+                st.plotly_chart(
+                    flow_net_compare_figure(labels, prev_nets, latest_nets),
+                    use_container_width=True)
+                if all(p is None for p in prev_nets):
+                    st.caption("Latest reading only so far — the "
+                               "previous-vs-latest comparison appears after "
+                               "the next 5-minute refresh.")
+                other = "QQQ" if sym == "SPY" else "SPY"
+                if not st.session_state.get(f"flow_hist_{other}"):
+                    st.caption(f"Fetch the {other} flow to add its bars "
+                               "to this comparison.")
         else:
             # Surface the real error so a failed fetch is diagnosable
             # from the screenshot (status / reason), not just "—".
