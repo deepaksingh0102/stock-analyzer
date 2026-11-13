@@ -883,6 +883,45 @@ def detail_view(use_demo: bool,
                          else " · live tracking paused (market closed)"))))
 
 
+def _signal_summary_frame(contracts, flow, call_syms):
+    """Compact Contract | Net flow | Signal summary (as requested).
+
+    Contract names are orange for puts, blue for calls; Signal is red
+    for Bearish, green for Bullish, gray for Neutral; Net flow is red
+    when negative, green when positive. Puts list first, then calls,
+    each by day volume descending.
+    """
+    puts = sorted((c for c in contracts if c["Contract"] not in call_syms),
+                  key=lambda c: c["Volume"], reverse=True)
+    calls = sorted((c for c in contracts if c["Contract"] in call_syms),
+                   key=lambda c: c["Volume"], reverse=True)
+    rows = []
+    for c in puts + calls:
+        f = flow.get(c["Contract"]) or {}
+        is_call = c["Contract"] in call_syms
+        label = f"{c['Strike']:g} {'Call' if is_call else 'Put'}"
+        if "error" in f:
+            rows.append({"Contract": label, "Net flow": "—", "Signal": "—"})
+        else:
+            net = f.get("buy_vol", 0) - f.get("sell_vol", 0)
+            rows.append({"Contract": label, "Net flow": net,
+                         "Signal": _contract_signal(is_call, net)})
+    df = pd.DataFrame(rows, columns=["Contract", "Net flow", "Signal"])
+    fmt = lambda v: f"{v:+,}" if isinstance(v, (int, float)) else v
+    return (df.style
+              .format({"Net flow": fmt})
+              .map(lambda v: "color: #ea580c" if v.endswith("Put")
+                   else "color: #2563eb", subset=["Contract"])
+              .map(lambda v: {"Bearish": "color: #dc2626",
+                              "Bullish": "color: #16a34a",
+                              "Neutral": "color: #6b7280"}.get(v, ""),
+                   subset=["Signal"])
+              .map(lambda v: "" if isinstance(v, str) else
+                   ("color: #dc2626" if v < 0 else
+                    ("color: #16a34a" if v > 0 else "")),
+                   subset=["Net flow"]))
+
+
 def _contract_signal(is_call: bool, net) -> str:
     """Per-contract flow signal from the tick-rule net (bought − sold).
 
@@ -1050,6 +1089,35 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
             cr_txt = f"{cr:.2f}" if cr is not None else "—"
             st.markdown(f"**Flow read: {sig['signal']}** — {sig['detail']}. "
                         f"Put buy/sell {pr_txt} · call buy/sell {cr_txt}.")
+            # Per-contract signal summary: the compact Contract | Net
+            # flow | Signal table (as requested), puts first then calls.
+            sigs = []
+            for c in contracts:
+                f = flow.get(c["Contract"]) or {}
+                if "error" in f:
+                    sigs.append("—")
+                else:
+                    sigs.append(_contract_signal(
+                        c["Contract"] in call_syms,
+                        f.get("buy_vol", 0) - f.get("sell_vol", 0)))
+            real = [s for s in sigs if s != "—"]
+            if sig["signal"] != "Neutral" and real and \
+                    all(s == sig["signal"] for s in real):
+                st.markdown(f"**{sym} — Stronger {sig['signal'].lower()} "
+                            "alignment**")
+                st.caption(f"All {len(real)} selected {sym} contracts align "
+                           f"with your {sig['signal'].lower()} rule.")
+            elif sig["signal"] != "Neutral":
+                n = sum(1 for s in real if s == sig["signal"])
+                st.markdown(f"**{sym} — {sig['signal']} lean**")
+                st.caption(f"{n} of {len(real)} {sym} contracts point "
+                           f"{sig['signal'].lower()}.")
+            else:
+                st.markdown(f"**{sym} — Mixed signals**")
+                st.caption(f"The {len(real)} {sym} contracts point in "
+                           "different directions.")
+            st.dataframe(_signal_summary_frame(contracts, flow, call_syms),
+                         hide_index=True, use_container_width=True)
             st.plotly_chart(flow_buysell_figure(cb, cs, pb, ps),
                             use_container_width=True)
             # Coverage: how much of the top contracts' day volume the
