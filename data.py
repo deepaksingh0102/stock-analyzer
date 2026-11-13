@@ -261,6 +261,40 @@ def fetch_prices(symbol: str) -> pd.DataFrame:
     return _clean_ohlc(df)
 
 
+def fetch_contract_oi(occ_symbol: str) -> dict:
+    """Open interest for one OCC contract from Alpaca's Trading API
+    (GET /v2/options/contracts/{symbol}). The market-data snapshots
+    endpoint the chain uses does NOT carry OI — that is why the OI
+    column read 0 — so OI needs this separate call, one per contract.
+    Returns {"oi": int, "oi_date": "YYYY-MM-DD"} or {"error": ...}.
+    NOTE: OI is an end-of-day number everywhere — the OCC computes it
+    once a day, so open_interest_date is the prior trading day even
+    from Alpaca. It shows where the outstanding book sits (the pin
+    question), not what traded today."""
+    import requests
+
+    if not alpaca_is_configured():
+        return {"error": "Alpaca options data is not configured."}
+    try:
+        r = requests.get(
+            "https://api.alpaca.markets/v2/options/contracts/"
+            f"{occ_symbol}",
+            headers=_alpaca_headers(), timeout=10)
+        if r.status_code in (401, 403):
+            return {"error": f"Not entitled to options contract data "
+                             f"(HTTP {r.status_code})."}
+        r.raise_for_status()
+        payload = r.json()
+        oi = payload.get("open_interest")
+        if oi is None:
+            return {"error": "No open interest returned for this "
+                             "contract."}
+        return {"oi": int(oi),
+                "oi_date": str(payload.get("open_interest_date") or "")}
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
 def fetch_vix_intraday() -> pd.DataFrame:
     """Today's VIX 5-minute bars from Yahoo Finance (^VIX). Alpaca
     carries VIX options but NOT the VIX spot level, so Yahoo is the

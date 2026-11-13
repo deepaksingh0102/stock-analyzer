@@ -16,7 +16,7 @@ import config
 import data
 import signals
 from charts import (intraday_chart, radar_history_figure, forecast_figure,
-                    flow_buysell_figure, vix_intraday_figure)
+                    oi_figure, vix_intraday_figure)
 
 # Streamlit Cloud secrets (App Settings → Secrets) override config.py,
 # so real API keys never have to be committed to the repo.
@@ -121,6 +121,20 @@ def load_vix_intraday():
     move all session. {"error": msg} on failure."""
     try:
         return data.fetch_vix_intraday()
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
+@st.cache_data(ttl=3600, max_entries=64, show_spinner=False)
+def load_contract_oi(occ_symbol: str, use_demo: bool):
+    """OI for one contract (Alpaca Trading API contracts endpoint).
+    Hourly cache: OI is an end-of-day number, fixed all session.
+    {"oi": int, "oi_date": str} or {"error": msg}."""
+    if use_demo:
+        return {"error": "Demo mode is offline — OI needs live Alpaca "
+                          "options data."}
+    try:
+        return data.fetch_contract_oi(occ_symbol)
     except Exception as exc:
         return {"error": str(exc)[:200]}
 
@@ -1016,6 +1030,18 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
                f"(P/C {row['P/C']}) · as of {row['asof']} ET · source: {row['source']}")
     contracts = sorted(row["top_calls"] + row["top_puts"],
                        key=lambda c: c["Volume"], reverse=True)
+    # Open interest from Alpaca's Trading API contracts endpoint — the
+    # snapshots feed the chain uses carries no OI, so the column read
+    # 0 until now. One call per contract, hourly cache; OI is an
+    # end-of-day number (the OCC computes it once a day), so oi_date
+    # is the prior trading day. The map fills the table's OI column
+    # and the OI chart below.
+    oi_map, oi_date = {}, None
+    for c in contracts:
+        oi = load_contract_oi(c["Contract"], use_demo)
+        if "error" not in oi:
+            oi_map[c["Contract"]] = oi["oi"]
+            oi_date = oi.get("oi_date") or oi_date
     # On-demand buy/sell flow: the snapshot feed carries total volume
     # only, and Alpaca has no historical options quotes, so the split is
     # a tick-rule estimate on ALL of today's trades per contract
@@ -1049,6 +1075,8 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
     table = []
     for c in contracts:
         d = dict(c)
+        if c["Contract"] in oi_map:
+            d["OI"] = oi_map[c["Contract"]]
         if show_flow and flow:
             f = flow.get(c["Contract"]) or {}
             if "error" in f:
@@ -1081,7 +1109,7 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
             st.caption(f"Top contracts — calls: bought {cb:,} / sold {cs:,} "
                        f"(net {cb - cs:+,}) · puts: bought {pb:,} / sold {ps:,} "
                        f"(net {pb - ps:+,}).")
-            # Directional read (desk rule) + buy-vs-sell chart. The
+            # Directional read (desk rule) + open-interest chart. The
             # signal is a flow read on today's top contracts, not a
             # prediction — the same tier-6 context as the table.
             sig = data.flow_direction(cb, cs, pb, ps)
@@ -1120,9 +1148,33 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
                            "different directions.")
             st.dataframe(_signal_summary_frame(contracts, flow, call_syms),
                          hide_index=True, use_container_width=True)
-            st.plotly_chart(flow_buysell_figure(cb, cs, pb, ps),
-                            use_container_width=True,
-                            key=f"flow_buysell_{sym}")
+            # Open-interest chart (replaces the buy-vs-sell chart, Nov
+            # 13): one bar per top contract, puts orange / calls blue.
+            # OI is the prior trading day's book — it shows where the
+            # big positions sit; today's flow (the table above) shows
+            # what traded today.
+            if oi_map:
+                oi_labels = [
+                    f"{c['Strike']:g} "
+                    f"{'Call' if c['Contract'] in call_syms else 'Put'}"
+                    for c in contracts if c["Contract"] in oi_map]
+                oi_vals = [oi_map[c["Contract"]] for c in contracts
+                           if c["Contract"] in oi_map]
+                oi_calls = [c["Contract"] in call_syms for c in contracts
+                            if c["Contract"] in oi_map]
+                st.plotly_chart(
+                    oi_figure(oi_labels, oi_vals, oi_calls,
+                              oi_date or "—"),
+                    use_container_width=True, key=f"oi_{sym}")
+                st.caption(f"Open interest is the prior trading day's "
+                           f"book — the OCC computes it once a day "
+                           f"(as of {oi_date or '—'}). It shows where "
+                           "the big positions sit; today's flow above "
+                           "shows what traded today.")
+            else:
+                st.caption("Open interest unavailable — the Alpaca "
+                           "contracts endpoint returned no OI for these "
+                           "contracts.")
             # Coverage: how much of the top contracts' day volume the
             # classification actually saw (full day now, not the last
             # 1,000 trades).
@@ -1144,9 +1196,9 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
                        "historical options quotes, so the quote rule "
                        "can't be used). Spread legs and mid-price prints "
                        "can misclassify — treat it as flow context, not "
-                       "a signal. The OI column reads 0 when the Alpaca "
-                       "snapshot feed returns no open interest for these "
-                       "contracts.")
+                       "a signal. The OI column comes from Alpaca's "
+                       "contracts endpoint — the snapshots feed the "
+                       "chain uses carries no OI.")
         else:
             # Surface the real error so a failed fetch is diagnosable
             # from the screenshot (status / reason), not just "—".
@@ -1160,8 +1212,8 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
     else:
         st.caption("Tip: 🔍 Show buy/sell flow classifies ALL of today's "
                    "trades per contract (tick rule) — an estimate, not "
-                   "the true bought/sold split — and shows the put/call "
-                   "buy-vs-sell chart with a directional read.")
+                   "the true bought/sold split — and shows the "
+                   "open-interest chart with a directional read.")
     # VIX intraday chart (replaces the daily chart, Nov 13): today's
     # 5-minute closes from Yahoo ^VIX — Alpaca carries VIX options but
     # not the VIX spot level. Shown in both tabs, flow on or off.

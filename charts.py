@@ -210,29 +210,17 @@ def vix_intraday_figure(times, closes):
     return fig
 
 
-def flow_buysell_figure(calls_buy: int, calls_sell: int,
-                        puts_buy: int, puts_sell: int) -> go.Figure:
-    """Grouped buy-vs-sell bars for the top contracts expiring today:
-    bought (green) vs sold (red) for calls and puts, with the net on
-    each pair in the title. A standalone figure — no shared axes with
-    the price panels, so no axis-name collision is possible."""
+def oi_figure(labels, oi_values, is_call, oi_date):
+    """Open interest per contract (one bar each), puts orange and
+    calls blue — the same colour language as the signal summary.
+    OI is the prior trading day's book (the OCC computes it once a
+    day), so the date is in the title."""
+    colors = ["#2563eb" if c else "#ea580c" for c in is_call]
     fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=["Calls", "Puts"], y=[calls_buy, puts_buy], name="Bought",
-        marker_color="#16a34a",
-        text=[f"{calls_buy:,}", f"{puts_buy:,}"],
-        textposition="outside"))
-    fig.add_trace(go.Bar(
-        x=["Calls", "Puts"], y=[calls_sell, puts_sell], name="Sold",
-        marker_color="#dc2626",
-        text=[f"{calls_sell:,}", f"{puts_sell:,}"],
-        textposition="outside"))
+    fig.add_trace(go.Bar(x=labels, y=oi_values, marker_color=colors))
     fig.update_layout(
-        barmode="group", height=280,
-        margin=dict(l=10, r=10, t=40, b=10),
-        title=(f"Buy vs sell — calls net {calls_buy - calls_sell:+,} · "
-               f"puts net {puts_buy - puts_sell:+,}"),
-        yaxis=dict(title="Contracts"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="right", x=1))
+        title=f"Open interest — top contracts (as of {oi_date})",
+        yaxis=dict(title="Contracts outstanding", tickformat="~s"),
+        height=300, margin=dict(l=50, r=20, t=40, b=40),
+    )
     return fig
