@@ -16,7 +16,7 @@ import config
 import data
 import signals
 from charts import (intraday_chart, radar_history_figure, forecast_figure,
-                    flow_buysell_figure, flow_net_compare_figure)
+                    flow_buysell_figure, flow_net_latest_figure)
 
 # Streamlit Cloud secrets (App Settings → Secrets) override config.py,
 # so real API keys never have to be committed to the repo.
@@ -1038,15 +1038,11 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
         show_flow = not show_flow
         st.session_state["flow_on"] = show_flow
     if show_flow:
-        flow_fresh = False  # True only when the flow was just fetched,
-        # not served from the snapshot — the previous-vs-latest history
-        # records real readings only, never a replayed snapshot.
         if closed_now and snap is not None and snap.get("flow") is not None:
             flow = snap["flow"]
         else:
             # Market open (bucket cache), or closed with no snapshot flow
             # yet — an explicit button press, so one fetch is fine.
-            flow_fresh = True
             with st.spinner("Classifying recent trades… (tick rule)"):
                 flow = {c["Contract"]: load_contract_flow(
                     c["Contract"], use_demo, bucket) for c in contracts}
@@ -1087,15 +1083,6 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
         if any_flow:
             cb, cs = _totals(flow, row["top_calls"])
             pb, ps = _totals(flow, row["top_puts"])
-            # Previous-vs-latest history: one entry per 5-minute bucket,
-            # last two readings only, fresh fetches only (a snapshot
-            # replay after close is not a new reading).
-            if flow_fresh:
-                hist = st.session_state.setdefault(f"flow_hist_{sym}", [])
-                if not hist or hist[-1]["bucket"] != bucket:
-                    hist.append({"bucket": bucket, "calls_net": cb - cs,
-                                 "puts_net": pb - ps})
-                    del hist[:-2]
             st.caption(f"Top contracts — calls: bought {cb:,} / sold {cs:,} "
                        f"(net {cb - cs:+,}) · puts: bought {pb:,} / sold {ps:,} "
                        f"(net {pb - ps:+,}).")
@@ -1164,23 +1151,20 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
                        "a signal. The OI column reads 0 when the Alpaca "
                        "snapshot feed returns no open interest for these "
                        "contracts.")
-            # VIX pair for the compare chart: each tab is paired with
-            # VIX flow (nearest expiry — VIX options expire on
-            # Wednesdays, so 'today' is usually empty) instead of the
-            # other tab. The VIX chain + trades ride the same 5-minute
-            # bucket cache, and after close they are served from a
-            # session snapshot, never refetched. The history records
-            # fresh VIX readings only, never a replayed snapshot.
+            # VIX pair for the chart: each tab is paired with VIX flow
+            # (nearest expiry — VIX options expire on Wednesdays, so
+            # 'today' is usually empty) instead of the other tab. The
+            # VIX chain + trades ride the same 5-minute bucket cache,
+            # and after close they are served from a session snapshot,
+            # never refetched.
             vix_nets, vix_exp, vix_err = None, None, None
             vix_snap = st.session_state.get("vix_flow_snap")
             if closed_now and vix_snap is not None and \
                     vix_snap.get("date") == _today_et.isoformat() and \
                     vix_snap.get("flow"):
                 vix_row, vix_flow = vix_snap["row"], vix_snap["flow"]
-                vix_fresh = False
             else:
                 vix_row = load_vix_chain(use_demo, bucket)
-                vix_fresh = True
                 if "error" in vix_row:
                     vix_flow, vix_err = None, vix_row["error"]
                 else:
@@ -1206,49 +1190,29 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
                     vpb, vps = _totals(vix_flow, vix_row["top_puts"])
                     vix_nets = (vcb - vcs, vpb - vps)
                     vix_exp = vix_row.get("expiry")
-                    if vix_fresh:
-                        vhist = st.session_state.setdefault(
-                            "flow_hist_VIX", [])
-                        if not vhist or vhist[-1]["bucket"] != bucket:
-                            vhist.append({"bucket": bucket,
-                                          "calls_net": vix_nets[0],
-                                          "puts_net": vix_nets[1]})
-                            del vhist[:-2]
-            # Previous-vs-latest net-flow chart: one pair of bars per
-            # group — this tab's symbol, then VIX (nearest expiry).
-            # A group with only one reading so far shows its Latest
-            # bar only.
-            labels, prev_nets, latest_nets = [], [], []
-            for s in (sym, "VIX"):
-                h = st.session_state.get(f"flow_hist_{s}", [])
-                if not h:
-                    continue
-                labels += [f"{s} calls", f"{s} puts"]
-                latest_nets += [h[-1]["calls_net"], h[-1]["puts_net"]]
-                if len(h) >= 2:
-                    prev_nets += [h[-2]["calls_net"], h[-2]["puts_net"]]
-                else:
-                    prev_nets += [None, None]
-            if labels:
-                st.plotly_chart(
-                    flow_net_compare_figure(labels, prev_nets, latest_nets),
-                    use_container_width=True)
-                if all(p is None for p in prev_nets):
-                    st.caption("Latest reading only so far — the "
-                               "previous-vs-latest comparison appears after "
-                               "the next 5-minute refresh.")
-                if vix_err:
-                    st.caption("VIX flow unavailable — "
-                               f"{str(vix_err)[:120]}.")
-                elif not st.session_state.get("flow_hist_VIX"):
-                    st.caption("VIX flow not loaded yet — its bars join "
-                               "this comparison once the VIX chain loads.")
-                elif vix_exp:
-                    vix_label = datetime.strptime(
-                        vix_exp, "%Y-%m-%d").strftime("%a %b %d")
-                    st.caption(f"VIX bars use the nearest expiry "
-                               f"({vix_label}) — VIX options expire "
-                               "Wednesdays, not today.")
+            # Latest net-flow chart: one group per symbol — this tab's
+            # symbol, then VIX (nearest expiry). Calls blue, puts
+            # orange, so the two sides are never the same colour.
+            symbols, calls_nets, puts_nets = [sym], [cb - cs], [pb - ps]
+            if vix_nets is not None:
+                symbols.append("VIX")
+                calls_nets.append(vix_nets[0])
+                puts_nets.append(vix_nets[1])
+            st.plotly_chart(
+                flow_net_latest_figure(symbols, calls_nets, puts_nets),
+                use_container_width=True)
+            if vix_err:
+                st.caption("VIX flow unavailable — "
+                           f"{str(vix_err)[:120]}.")
+            elif vix_nets is None:
+                st.caption("VIX flow not loaded yet — its bars join "
+                           "this chart once the VIX chain loads.")
+            elif vix_exp:
+                vix_label = datetime.strptime(
+                    vix_exp, "%Y-%m-%d").strftime("%a %b %d")
+                st.caption(f"VIX bars use the nearest expiry "
+                           f"({vix_label}) — VIX options expire "
+                           "Wednesdays, not today.")
         else:
             # Surface the real error so a failed fetch is diagnosable
             # from the screenshot (status / reason), not just "—".

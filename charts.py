@@ -193,25 +193,20 @@ def forecast_figure(fc: dict) -> go.Figure:
     return fig
 
 
-def flow_net_compare_figure(labels, prev_nets, latest_nets):
-    """Previous (blue) vs latest (green) net-flow bars per group.
-
-    labels: e.g. ["SPY calls", "SPY puts", "QQQ calls", "QQQ puts"];
-    nets are bought-minus-sold contracts for the group's top contracts.
-    prev_nets may hold None for a group with no previous reading yet —
-    Plotly leaves that bar out, so a symbol fetched once shows only its
-    Latest bar. The Previous trace is skipped entirely when no group has
-    a previous reading.
+def flow_net_latest_figure(symbols, calls_nets, puts_nets):
+    """Latest net-flow bars only: one group per symbol, Calls blue and
+    Puts orange — so the two sides are never the same colour. Nets are
+    bought-minus-sold contracts for the symbol's top contracts. A
+    symbol with no flow loaded is left out by the caller.
     """
     fig = go.Figure()
-    if any(p is not None for p in prev_nets):
-        fig.add_trace(go.Bar(x=labels, y=prev_nets, name="Previous",
-                             marker_color="#3b82f6"))
-    fig.add_trace(go.Bar(x=labels, y=latest_nets, name="Latest",
-                         marker_color="#22c55e"))
+    fig.add_trace(go.Bar(x=symbols, y=calls_nets, name="Calls",
+                         marker_color="#2563eb"))
+    fig.add_trace(go.Bar(x=symbols, y=puts_nets, name="Puts",
+                         marker_color="#ea580c"))
     fig.update_layout(
         barmode="group",
-        title="Net flow — previous vs latest",
+        title="Net flow — latest",
         yaxis=dict(title="Net contracts (bought − sold)", tickformat="~s",
                    zeroline=True, zerolinewidth=2, zerolinecolor="#94a3b8"),
         height=300, margin=dict(l=50, r=20, t=40, b=40),
