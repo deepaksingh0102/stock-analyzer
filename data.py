@@ -2521,7 +2521,8 @@ TODAY_EXPIRY_NAMES = {"SPY": "S&P 500 ETF", "QQQ": "Nasdaq-100 ETF",
                       **OPTIONS_NAMES}
 
 
-def symbol_expiry_contracts(sym: str, top_contracts: int = 3) -> dict:
+def symbol_expiry_contracts(sym: str, top_contracts: int = 3,
+                            nearest: bool = False) -> dict:
     """One symbol's contracts expiring today (0DTE): total calls/puts
     volume plus the top `top_contracts` calls and puts by today's volume,
     each with its OCC contract symbol, strike, bid, ask, last, volume
@@ -2529,7 +2530,13 @@ def symbol_expiry_contracts(sym: str, top_contracts: int = 3) -> dict:
     feed first then the indicative feed — the same pattern as the
     charting app's PCR fetch. Returns a ranking-style row dict
     ({"Symbol", "Name", "Options volume", "Calls", "Puts", "P/C",
-    "top_calls", "top_puts", "source", "asof"}) or {"error": ...}."""
+    "top_calls", "top_puts", "source", "asof", "expiry"}) or
+    {"error": ...}. With nearest=True the chain is taken at the
+    nearest expiry on or after today instead of today — for VIX,
+    whose options expire on Wednesdays (monthly = the Wednesday 30
+    days before the next month's third Friday), so 'expiring today'
+    is usually empty; the compare chart pairs each tab with that
+    nearest VIX expiry."""
     import re
     import requests
     from datetime import datetime
@@ -2547,8 +2554,9 @@ def symbol_expiry_contracts(sym: str, top_contracts: int = 3) -> dict:
             found = False
             while pages < 20:
                 params = {"feed": feed, "limit": 1000,
-                          "expiration_date_gte": today.isoformat(),
-                          "expiration_date_lte": today.isoformat()}
+                          "expiration_date_gte": today.isoformat()}
+                if not nearest:
+                    params["expiration_date_lte"] = today.isoformat()
                 if token:
                     params["page_token"] = token
                 r = requests.get(
@@ -2575,7 +2583,8 @@ def symbol_expiry_contracts(sym: str, top_contracts: int = 3) -> dict:
                         "Last": (snap.get("latestTrade") or {}).get("p")
                                 or (snap.get("dailyBar") or {}).get("c"),
                         "Volume": int(vol),
-                        "OI": int(snap.get("openInterest") or 0)})
+                        "OI": int(snap.get("openInterest") or 0),
+                        "exp": m.group(1)})  # YYMMDD, dropped before return
                     found = True
                 token = payload.get("next_page_token")
                 pages += 1
@@ -2587,9 +2596,20 @@ def symbol_expiry_contracts(sym: str, top_contracts: int = 3) -> dict:
         except Exception:
             continue
     if not contracts:
+        if nearest:
+            return {"error": f"No {sym} contracts expiring on or after "
+                              "today found."}
         return {"error": f"No {sym} contracts expiring today found — "
                           "single-stock 0DTE chains mostly exist on "
                           "Fridays; SPY/QQQ list every trading day."}
+    if nearest:
+        nearest_exp = min(c["exp"] for c in contracts)
+        contracts = [c for c in contracts if c["exp"] == nearest_exp]
+        expiry = datetime.strptime(nearest_exp, "%y%m%d").date()
+    else:
+        expiry = today
+    for c in contracts:
+        del c["exp"]
     calls = [c for c in contracts if c["Type"] == "Call"]
     puts = [c for c in contracts if c["Type"] == "Put"]
     cv = sum(c["Volume"] for c in calls)
@@ -2604,6 +2624,7 @@ def symbol_expiry_contracts(sym: str, top_contracts: int = 3) -> dict:
             "top_calls": calls[:top_contracts],
             "top_puts": puts[:top_contracts],
             "source": f"Alpaca ({feed_used})",
+            "expiry": expiry.isoformat(),
             "asof": datetime.now(ZoneInfo("America/New_York"))
                     .strftime("%H:%M")}
 

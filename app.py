@@ -115,6 +115,22 @@ def load_symbol_chain(sym: str, use_demo: bool, bucket: int = 0):
 
 
 @st.cache_data(ttl=600, max_entries=32, show_spinner=False)
+def load_vix_chain(use_demo: bool, bucket: int = 0):
+    """VIX contracts at the nearest expiry. VIX options expire on
+    Wednesdays (monthly = the Wednesday 30 days before the next
+    month's third Friday), so 'expiring today' is usually empty —
+    the compare chart pairs each tab with the nearest VIX expiry
+    instead. {"error": msg} on failure."""
+    if use_demo:
+        return {"error": "Demo mode is offline — the VIX chain needs "
+                          "live Alpaca options data."}
+    try:
+        return data.symbol_expiry_contracts("VIX", nearest=True)
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
+@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
 def load_contract_flow(occ: str, use_demo: bool, bucket: int = 0):
     """Buy/sell flow estimate for one OCC contract (tick rule on ALL of
     today's trades, paginated). {"error": msg} on failure."""
@@ -1056,10 +1072,10 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
         table.append(d)
     st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
     if show_flow and flow:
-        def _totals(contracts_of_type):
+        def _totals(flow_d, contracts_of_type):
             b = s = 0
             for c in contracts_of_type:
-                f = flow.get(c["Contract"]) or {}
+                f = flow_d.get(c["Contract"]) or {}
                 if "error" in f:
                     continue
                 b += f.get("buy_vol", 0)
@@ -1069,8 +1085,8 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
         any_flow = any("error" not in (flow.get(c["Contract"]) or {})
                        for c in contracts)
         if any_flow:
-            cb, cs = _totals(row["top_calls"])
-            pb, ps = _totals(row["top_puts"])
+            cb, cs = _totals(flow, row["top_calls"])
+            pb, ps = _totals(flow, row["top_puts"])
             # Previous-vs-latest history: one entry per 5-minute bucket,
             # last two readings only, fresh fetches only (a snapshot
             # replay after close is not a new reading).
@@ -1148,12 +1164,62 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
                        "a signal. The OI column reads 0 when the Alpaca "
                        "snapshot feed returns no open interest for these "
                        "contracts.")
+            # VIX pair for the compare chart: each tab is paired with
+            # VIX flow (nearest expiry — VIX options expire on
+            # Wednesdays, so 'today' is usually empty) instead of the
+            # other tab. The VIX chain + trades ride the same 5-minute
+            # bucket cache, and after close they are served from a
+            # session snapshot, never refetched. The history records
+            # fresh VIX readings only, never a replayed snapshot.
+            vix_nets, vix_exp, vix_err = None, None, None
+            vix_snap = st.session_state.get("vix_flow_snap")
+            if closed_now and vix_snap is not None and \
+                    vix_snap.get("date") == _today_et.isoformat() and \
+                    vix_snap.get("flow"):
+                vix_row, vix_flow = vix_snap["row"], vix_snap["flow"]
+                vix_fresh = False
+            else:
+                vix_row = load_vix_chain(use_demo, bucket)
+                vix_fresh = True
+                if "error" in vix_row:
+                    vix_flow, vix_err = None, vix_row["error"]
+                else:
+                    vix_flow = {c["Contract"]: load_contract_flow(
+                        c["Contract"], use_demo, bucket)
+                        for c in sorted(vix_row["top_calls"]
+                                        + vix_row["top_puts"],
+                                        key=lambda c: c["Volume"],
+                                        reverse=True)}
+                    st.session_state["vix_flow_snap"] = {
+                        "date": _today_et.isoformat(),
+                        "row": vix_row, "flow": vix_flow}
+            if vix_flow:
+                vix_contracts = sorted(vix_row["top_calls"]
+                                       + vix_row["top_puts"],
+                                       key=lambda c: c["Volume"],
+                                       reverse=True)
+                vix_any = any("error" not in
+                              (vix_flow.get(c["Contract"]) or {})
+                              for c in vix_contracts)
+                if vix_any:
+                    vcb, vcs = _totals(vix_flow, vix_row["top_calls"])
+                    vpb, vps = _totals(vix_flow, vix_row["top_puts"])
+                    vix_nets = (vcb - vcs, vpb - vps)
+                    vix_exp = vix_row.get("expiry")
+                    if vix_fresh:
+                        vhist = st.session_state.setdefault(
+                            "flow_hist_VIX", [])
+                        if not vhist or vhist[-1]["bucket"] != bucket:
+                            vhist.append({"bucket": bucket,
+                                          "calls_net": vix_nets[0],
+                                          "puts_net": vix_nets[1]})
+                            del vhist[:-2]
             # Previous-vs-latest net-flow chart: one pair of bars per
-            # group — SPY calls/puts, then QQQ calls/puts when that
-            # symbol's flow has been fetched too. A group with only one
-            # reading so far shows its Latest bar only.
+            # group — this tab's symbol, then VIX (nearest expiry).
+            # A group with only one reading so far shows its Latest
+            # bar only.
             labels, prev_nets, latest_nets = [], [], []
-            for s in ("SPY", "QQQ"):
+            for s in (sym, "VIX"):
                 h = st.session_state.get(f"flow_hist_{s}", [])
                 if not h:
                     continue
@@ -1171,10 +1237,18 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
                     st.caption("Latest reading only so far — the "
                                "previous-vs-latest comparison appears after "
                                "the next 5-minute refresh.")
-                other = "QQQ" if sym == "SPY" else "SPY"
-                if not st.session_state.get(f"flow_hist_{other}"):
-                    st.caption(f"Fetch the {other} flow to add its bars "
-                               "to this comparison.")
+                if vix_err:
+                    st.caption("VIX flow unavailable — "
+                               f"{str(vix_err)[:120]}.")
+                elif not st.session_state.get("flow_hist_VIX"):
+                    st.caption("VIX flow not loaded yet — its bars join "
+                               "this comparison once the VIX chain loads.")
+                elif vix_exp:
+                    vix_label = datetime.strptime(
+                        vix_exp, "%Y-%m-%d").strftime("%a %b %d")
+                    st.caption(f"VIX bars use the nearest expiry "
+                               f"({vix_label}) — VIX options expire "
+                               "Wednesdays, not today.")
         else:
             # Surface the real error so a failed fetch is diagnosable
             # from the screenshot (status / reason), not just "—".
