@@ -16,7 +16,7 @@ import config
 import data
 import signals
 from charts import (intraday_chart, radar_history_figure, forecast_figure,
-                    flow_buysell_figure, vix_daily_figure)
+                    flow_buysell_figure, vix_intraday_figure)
 
 # Streamlit Cloud secrets (App Settings → Secrets) override config.py,
 # so real API keys never have to be committed to the repo.
@@ -114,13 +114,13 @@ def load_symbol_chain(sym: str, use_demo: bool, bucket: int = 0):
         return {"error": str(exc)[:200]}
 
 
-@st.cache_data(ttl=3600, max_entries=4, show_spinner=False)
-def load_vix_daily():
-    """VIX daily closes for the VIX chart (Yahoo ^VIX — Alpaca has no
-    VIX spot level). Hourly cache: daily bars move once a day.
-    {"error": msg} on failure."""
+@st.cache_data(ttl=300, max_entries=4, show_spinner=False)
+def load_vix_intraday():
+    """Today's VIX 5-minute closes for the VIX chart (Yahoo ^VIX —
+    Alpaca has no VIX spot level). 5-minute cache: intraday bars
+    move all session. {"error": msg} on failure."""
     try:
-        return data.fetch_vix_daily()
+        return data.fetch_vix_intraday()
     except Exception as exc:
         return {"error": str(exc)[:200]}
 
@@ -1162,17 +1162,19 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
                    "trades per contract (tick rule) — an estimate, not "
                    "the true bought/sold split — and shows the put/call "
                    "buy-vs-sell chart with a directional read.")
-    # VIX daily chart (replaces the net-flow latest chart, Nov 13):
-    # daily closes from Yahoo ^VIX — Alpaca carries VIX options but
+    # VIX intraday chart (replaces the daily chart, Nov 13): today's
+    # 5-minute closes from Yahoo ^VIX — Alpaca carries VIX options but
     # not the VIX spot level. Shown in both tabs, flow on or off.
-    vix = load_vix_daily()
+    vix = load_vix_intraday()
     if isinstance(vix, dict) and "error" in vix:
-        st.caption(f"VIX daily chart unavailable — {vix['error'][:120]}.")
+        st.caption(f"VIX today unavailable — {vix['error'][:120]}.")
     else:
-        st.plotly_chart(vix_daily_figure(vix.index, vix["Close"]),
-                        use_container_width=True, key=f"vix_daily_{sym}")
-        st.caption(f"VIX daily closes, Yahoo Finance (^VIX) · "
-                   f"{len(vix)} sessions · latest "
+        st.plotly_chart(vix_intraday_figure(vix.index, vix["Close"]),
+                        use_container_width=True, key=f"vix_today_{sym}")
+        st.caption(f"VIX today (5-min), Yahoo Finance (^VIX) · open "
+                   f"{float(vix['Close'].iloc[0]):.2f} · high "
+                   f"{float(vix['Close'].max()):.2f} · low "
+                   f"{float(vix['Close'].min()):.2f} · latest "
                    f"{float(vix['Close'].iloc[-1]):.2f}.")
 
 

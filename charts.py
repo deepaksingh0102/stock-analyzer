@@ -193,17 +193,16 @@ def forecast_figure(fc: dict) -> go.Figure:
     return fig
 
 
-def vix_daily_figure(dates, closes):
-    """VIX daily closes (line + markers); the latest close is in the
+def vix_intraday_figure(times, closes):
+    """Today's VIX 5-minute closes (line); the latest close is in the
     title so the level reads at a glance."""
-    xs = list(dates)
+    xs = list(times)
     ys = [float(v) for v in closes]
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines+markers", name="VIX",
-                             line=dict(color="#2563eb", width=2),
-                             marker=dict(size=4, color="#2563eb")))
+    fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name="VIX",
+                             line=dict(color="#2563eb", width=2)))
     fig.update_layout(
-        title=f"VIX — daily close (latest {ys[-1]:.2f})",
+        title=f"VIX — today (latest {ys[-1]:.2f})",
         yaxis=dict(title="VIX"),
         height=300, margin=dict(l=50, r=20, t=40, b=40),
         legend=dict(orientation="h", y=-0.18),
