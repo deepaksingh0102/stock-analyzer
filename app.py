@@ -1012,11 +1012,15 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
     # A button, not a refresh-loop fetch: the flow is loaded through the
     # 5-minute bucket cache when asked for, and stored in the session
     # snapshot so after-close ticks serve it without refetching.
-    show_flow = st.session_state.get(f"flow_{sym}", False)
+    # One switch for both tabs (Nov 13): the flag used to be per-tab, so
+    # the SPY tab sat on the plain table while QQQ had flow — one press
+    # in either tab now turns flow on for both, and the compare chart is
+    # never half-empty.
+    show_flow = st.session_state.get("flow_on", False)
     label = "Hide buy/sell flow" if show_flow else "🔍 Show buy/sell flow"
     if st.button(label, key=f"flow_btn_{sym}"):
         show_flow = not show_flow
-        st.session_state[f"flow_{sym}"] = show_flow
+        st.session_state["flow_on"] = show_flow
     if show_flow:
         flow_fresh = False  # True only when the flow was just fetched,
         # not served from the snapshot — the previous-vs-latest history
