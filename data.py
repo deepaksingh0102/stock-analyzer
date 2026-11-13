@@ -261,6 +261,20 @@ def fetch_prices(symbol: str) -> pd.DataFrame:
     return _clean_ohlc(df)
 
 
+def fetch_vix_daily(period: str = "3mo") -> pd.DataFrame:
+    """VIX daily closes from Yahoo Finance (^VIX). Alpaca carries VIX
+    options but NOT the VIX spot level, so Yahoo is the source here —
+    the same yfinance path the app already uses when Alpaca keys are
+    absent. Returns a DatetimeIndex'd OHLC frame (daily bars)."""
+    import yfinance as yf
+
+    df = yf.Ticker("^VIX").history(period=period, interval="1d",
+                                   auto_adjust=False)
+    if df is None or df.empty:
+        raise ValueError("No VIX daily data from Yahoo Finance.")
+    return _clean_ohlc(df)
+
+
 def fetch_intraday(symbol: str, period: str = INTRADAY_PERIOD,
                    end_iso: str | None = None) -> pd.DataFrame:
     """1-minute bars, regular session only (9:30–16:00 ET).

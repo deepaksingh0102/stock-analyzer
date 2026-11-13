@@ -193,22 +193,18 @@ def forecast_figure(fc: dict) -> go.Figure:
     return fig
 
 
-def flow_net_latest_figure(symbols, calls_nets, puts_nets):
-    """Latest net-flow bars only: one group per symbol, Calls blue and
-    Puts orange — so the two sides are never the same colour. Nets are
-    bought-minus-sold contracts for the symbol's top contracts. A
-    symbol with no flow loaded is left out by the caller.
-    """
+def vix_daily_figure(dates, closes):
+    """VIX daily closes (line + markers); the latest close is in the
+    title so the level reads at a glance."""
+    xs = list(dates)
+    ys = [float(v) for v in closes]
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=symbols, y=calls_nets, name="Calls",
-                         marker_color="#2563eb"))
-    fig.add_trace(go.Bar(x=symbols, y=puts_nets, name="Puts",
-                         marker_color="#ea580c"))
+    fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines+markers", name="VIX",
+                             line=dict(color="#2563eb", width=2),
+                             marker=dict(size=4, color="#2563eb")))
     fig.update_layout(
-        barmode="group",
-        title="Net flow — latest",
-        yaxis=dict(title="Net contracts (bought − sold)", tickformat="~s",
-                   zeroline=True, zerolinewidth=2, zerolinecolor="#94a3b8"),
+        title=f"VIX — daily close (latest {ys[-1]:.2f})",
+        yaxis=dict(title="VIX"),
         height=300, margin=dict(l=50, r=20, t=40, b=40),
         legend=dict(orientation="h", y=-0.18),
     )

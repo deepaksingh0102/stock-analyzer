@@ -16,7 +16,7 @@ import config
 import data
 import signals
 from charts import (intraday_chart, radar_history_figure, forecast_figure,
-                    flow_buysell_figure, flow_net_latest_figure)
+                    flow_buysell_figure, vix_daily_figure)
 
 # Streamlit Cloud secrets (App Settings → Secrets) override config.py,
 # so real API keys never have to be committed to the repo.
@@ -114,18 +114,13 @@ def load_symbol_chain(sym: str, use_demo: bool, bucket: int = 0):
         return {"error": str(exc)[:200]}
 
 
-@st.cache_data(ttl=600, max_entries=32, show_spinner=False)
-def load_vix_chain(use_demo: bool, bucket: int = 0):
-    """VIX contracts at the nearest expiry. VIX options expire on
-    Wednesdays (monthly = the Wednesday 30 days before the next
-    month's third Friday), so 'expiring today' is usually empty —
-    the compare chart pairs each tab with the nearest VIX expiry
-    instead. {"error": msg} on failure."""
-    if use_demo:
-        return {"error": "Demo mode is offline — the VIX chain needs "
-                          "live Alpaca options data."}
+@st.cache_data(ttl=3600, max_entries=4, show_spinner=False)
+def load_vix_daily():
+    """VIX daily closes for the VIX chart (Yahoo ^VIX — Alpaca has no
+    VIX spot level). Hourly cache: daily bars move once a day.
+    {"error": msg} on failure."""
     try:
-        return data.symbol_expiry_contracts("VIX", nearest=True)
+        return data.fetch_vix_daily()
     except Exception as exc:
         return {"error": str(exc)[:200]}
 
@@ -1151,68 +1146,6 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
                        "a signal. The OI column reads 0 when the Alpaca "
                        "snapshot feed returns no open interest for these "
                        "contracts.")
-            # VIX pair for the chart: each tab is paired with VIX flow
-            # (nearest expiry — VIX options expire on Wednesdays, so
-            # 'today' is usually empty) instead of the other tab. The
-            # VIX chain + trades ride the same 5-minute bucket cache,
-            # and after close they are served from a session snapshot,
-            # never refetched.
-            vix_nets, vix_exp, vix_err = None, None, None
-            vix_snap = st.session_state.get("vix_flow_snap")
-            if closed_now and vix_snap is not None and \
-                    vix_snap.get("date") == _today_et.isoformat() and \
-                    vix_snap.get("flow"):
-                vix_row, vix_flow = vix_snap["row"], vix_snap["flow"]
-            else:
-                vix_row = load_vix_chain(use_demo, bucket)
-                if "error" in vix_row:
-                    vix_flow, vix_err = None, vix_row["error"]
-                else:
-                    vix_flow = {c["Contract"]: load_contract_flow(
-                        c["Contract"], use_demo, bucket)
-                        for c in sorted(vix_row["top_calls"]
-                                        + vix_row["top_puts"],
-                                        key=lambda c: c["Volume"],
-                                        reverse=True)}
-                    st.session_state["vix_flow_snap"] = {
-                        "date": _today_et.isoformat(),
-                        "row": vix_row, "flow": vix_flow}
-            if vix_flow:
-                vix_contracts = sorted(vix_row["top_calls"]
-                                       + vix_row["top_puts"],
-                                       key=lambda c: c["Volume"],
-                                       reverse=True)
-                vix_any = any("error" not in
-                              (vix_flow.get(c["Contract"]) or {})
-                              for c in vix_contracts)
-                if vix_any:
-                    vcb, vcs = _totals(vix_flow, vix_row["top_calls"])
-                    vpb, vps = _totals(vix_flow, vix_row["top_puts"])
-                    vix_nets = (vcb - vcs, vpb - vps)
-                    vix_exp = vix_row.get("expiry")
-            # Latest net-flow chart: one group per symbol — this tab's
-            # symbol, then VIX (nearest expiry). Calls blue, puts
-            # orange, so the two sides are never the same colour.
-            symbols, calls_nets, puts_nets = [sym], [cb - cs], [pb - ps]
-            if vix_nets is not None:
-                symbols.append("VIX")
-                calls_nets.append(vix_nets[0])
-                puts_nets.append(vix_nets[1])
-            st.plotly_chart(
-                flow_net_latest_figure(symbols, calls_nets, puts_nets),
-                use_container_width=True)
-            if vix_err:
-                st.caption("VIX flow unavailable — "
-                           f"{str(vix_err)[:120]}.")
-            elif vix_nets is None:
-                st.caption("VIX flow not loaded yet — its bars join "
-                           "this chart once the VIX chain loads.")
-            elif vix_exp:
-                vix_label = datetime.strptime(
-                    vix_exp, "%Y-%m-%d").strftime("%a %b %d")
-                st.caption(f"VIX bars use the nearest expiry "
-                           f"({vix_label}) — VIX options expire "
-                           "Wednesdays, not today.")
         else:
             # Surface the real error so a failed fetch is diagnosable
             # from the screenshot (status / reason), not just "—".
@@ -1228,6 +1161,18 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
                    "trades per contract (tick rule) — an estimate, not "
                    "the true bought/sold split — and shows the put/call "
                    "buy-vs-sell chart with a directional read.")
+    # VIX daily chart (replaces the net-flow latest chart, Nov 13):
+    # daily closes from Yahoo ^VIX — Alpaca carries VIX options but
+    # not the VIX spot level. Shown in both tabs, flow on or off.
+    vix = load_vix_daily()
+    if isinstance(vix, dict) and "error" in vix:
+        st.caption(f"VIX daily chart unavailable — {vix['error'][:120]}.")
+    else:
+        st.plotly_chart(vix_daily_figure(vix.index, vix["Close"]),
+                        use_container_width=True)
+        st.caption(f"VIX daily closes, Yahoo Finance (^VIX) · "
+                   f"{len(vix)} sessions · latest "
+                   f"{float(vix['Close'].iloc[-1]):.2f}.")
 
 
 with tab_detail:
