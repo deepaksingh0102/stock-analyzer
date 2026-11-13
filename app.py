@@ -1121,7 +1121,8 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
             st.dataframe(_signal_summary_frame(contracts, flow, call_syms),
                          hide_index=True, use_container_width=True)
             st.plotly_chart(flow_buysell_figure(cb, cs, pb, ps),
-                            use_container_width=True)
+                            use_container_width=True,
+                            key=f"flow_buysell_{sym}")
             # Coverage: how much of the top contracts' day volume the
             # classification actually saw (full day now, not the last
             # 1,000 trades).
@@ -1169,7 +1170,7 @@ def symbol_options_view(sym: str, use_demo: bool, live: bool, refresh_secs: int)
         st.caption(f"VIX daily chart unavailable — {vix['error'][:120]}.")
     else:
         st.plotly_chart(vix_daily_figure(vix.index, vix["Close"]),
-                        use_container_width=True)
+                        use_container_width=True, key=f"vix_daily_{sym}")
         st.caption(f"VIX daily closes, Yahoo Finance (^VIX) · "
                    f"{len(vix)} sessions · latest "
                    f"{float(vix['Close'].iloc[-1]):.2f}.")
